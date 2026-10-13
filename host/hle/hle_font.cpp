@@ -256,6 +256,11 @@ void blit_glyph(psprecomp::GuestMemory &memory, std::uint32_t image_address, std
 
 } // namespace
 
+std::uint32_t &alternate_character_code() {
+    static std::uint32_t code = 0u;
+    return code;
+}
+
 void register_font(HleRegistrar &hle) {
     fonts::ready();
     fonts::set_reload_hook(forget_game_glyphs);
@@ -311,13 +316,22 @@ void register_font(HleRegistrar &hle) {
         const std::uint32_t library = arg(ctx, 0);
         const std::uint32_t font_data = arg(ctx, 1);
         const std::uint32_t font_size = arg(ctx, 2);
-        const std::uint32_t mode = arg(ctx, 3);
-        const std::uint32_t error_code = arg(ctx, 4);
-        trace("OpenUserMemory lib=%08X data=%08X size=%08X mode=%08X error=%08X ra=%08X",
-              library, font_data, font_size, mode, error_code, ctx.gpr[31]);
+        // PSP SDK signature is (library, fontData, fontSize, errorCodePtr):
+        // the fourth argument is a3, not t0/a fifth pseudo-argument.
+        const std::uint32_t error_code = arg(ctx, 3);
+        trace("OpenUserMemory lib=%08X data=%08X size=%08X error=%08X ra=%08X",
+              library, font_data, font_size, error_code, ctx.gpr[31]);
         if (error_code != 0u) rt.memory().store32(error_code, 0u);
         kernel().finish(ctx, fonts::ready() && font_data != 0u && font_size != 0u ? kFontHandle : 0u);
     });
+    // The game uses this fallback when a requested glyph is absent from the host font.
+    hle.add("sceLibFont", "sceFontSetAltCharacterCode", [](Runtime &, AllegrexContext &ctx) {
+        alternate_character_code() = arg(ctx, 1) & 0xFFFFu;
+        trace("SetAltCharacterCode lib=%08X code=%04X ra=%08X", arg(ctx, 0),
+              alternate_character_code(), ctx.gpr[31]);
+        kernel().finish(ctx, 0u);
+    });
+
     hle.add("sceLibFont", "sceFontClose", [](Runtime &, AllegrexContext &ctx) {
         trace("Close font=%08X", arg(ctx, 0));
         kernel().finish(ctx, 0u);
@@ -337,7 +351,12 @@ void register_font(HleRegistrar &hle) {
             kernel().finish(ctx, 0u);
             return;
         }
-        const fonts::GlyphMetrics glyph = fonts::ready() ? fonts::metrics(arg(ctx, 1)) : fonts::GlyphMetrics{};
+        std::uint32_t code = arg(ctx, 1);
+        fonts::GlyphMetrics glyph = fonts::ready() ? fonts::metrics(code) : fonts::GlyphMetrics{};
+        if (fonts::ready() && !glyph.found && alternate_character_code() != 0u) {
+            code = alternate_character_code();
+            glyph = fonts::metrics(code);
+        }
         write_char_info(rt.memory(), address, glyph);
         trace("GetCharInfo code=%04X w=%d h=%d left=%d top=%d adv=%.2f%s ra=%08X", arg(ctx, 1), glyph.width,
               glyph.height, glyph.left, glyph.top, static_cast<double>(glyph.advance), glyph.found ? "" : " missing",
@@ -355,7 +374,12 @@ void register_font(HleRegistrar &hle) {
                   m.load16(image + 16u), m.load32(image + 20u), ctx.gpr[31]);
         }
         note_game_cache(rt.memory(), ctx);
-        if (image != 0u && fonts::ready()) blit_glyph(rt.memory(), image, arg(ctx, 1));
+        if (image != 0u && fonts::ready()) {
+            std::uint32_t code = arg(ctx, 1);
+            if (!fonts::metrics(code).found && alternate_character_code() != 0u)
+                code = alternate_character_code();
+            blit_glyph(rt.memory(), image, code);
+        }
         kernel().finish(ctx, 0u);
     });
     // The same, drawing only inside the rectangle (a3, t0) sized (t1, t2).

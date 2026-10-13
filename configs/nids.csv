@@ -164,6 +164,7 @@ sceLibFont,0x67F17ED7,sceFontNewLib
 sceLibFont,0x980F4895,sceFontGetCharGlyphImage
 sceLibFont,0xA834319D,sceFontOpen
 sceLibFont,0xDCC80C2F,sceFontGetCharInfo
+sceLibFont,0xEE232411,sceFontSetAltCharacterCode
 sceLibFont,0x02D7F94B,sceFontFlush
 sceLibFont,0x57FCB733,sceFontOpenUserFile
 sceLibFont,0xBB8E7FE6,sceFontOpenUserMemory
@@ -570,3 +571,4 @@ scePspNpDrm_user,0x08D98894,sceNpDrmEdataSetupKey
 ThreadManForUser,0x8DAFF657,sceKernelCreateTlspl
 ThreadManForUser,0x32BF938E,sceKernelDeleteTlspl
 Kernel_Library,0xFA835CDE,sceKernelGetTlsAddr
+scePspNpDrm_user,0x219EF5CC,sceNpDrmEdataGetDataSize

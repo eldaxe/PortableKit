@@ -75,6 +75,7 @@ struct OpenFile {
     std::uint64_t disc_offset{};  // absolute image offset of byte 0
     std::uint64_t size{};
     std::uint64_t position{};
+    std::uint32_t alias_diagnostic_reads{};
     // The raw disc device counts 2048-byte sectors, not bytes: a seek moves
     // to a sector, a read asks for that many sectors and answers with how
     // many it got. Everything else here counts bytes, so size and position
@@ -217,6 +218,31 @@ std::optional<std::pair<std::uint64_t, std::uint64_t>> parse_lbn_path(const std:
 
 std::filesystem::path host_path(const std::string &path) { return io().memory_stick / path; }
 
+std::string normalized_path(std::string path) {
+    std::replace(path.begin(), path.end(), '\\', '/');
+    std::transform(path.begin(), path.end(), path.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    while (!path.empty() && path.front() == '/') path.erase(path.begin());
+    while (!path.empty() && path.back() == '/') path.pop_back();
+    return path;
+}
+
+std::optional<IsoImage::Entry> aliased_disc_file(const std::string &memory_stick_path) {
+    if (!io().disc) return std::nullopt;
+    const std::string requested = normalized_path(memory_stick_path);
+    for (const DiscFileAlias &alias : game().disc_file_aliases) {
+        if (normalized_path(alias.memory_stick_path) != requested) continue;
+        const auto entry = io().disc->find(alias.disc_path);
+        if (entry && !entry->directory) return entry;
+    }
+    return std::nullopt;
+}
+
+bool is_disc_file_alias(const OpenFile &file) {
+    const SplitPath split = split_path(file.path);
+    return split.device == Device::MemoryStick && aliased_disc_file(split.path).has_value();
+}
+
 bool trace_io() {
     static const bool enabled = portablekit::env("TRACE_IO") != nullptr;
     return enabled;
@@ -255,7 +281,21 @@ std::int64_t open_file(const std::string &full_path, std::uint32_t flags) {
         const auto path = host_path(split.path);
         std::error_code ec;
         const bool exists = std::filesystem::exists(path, ec);
-        if (!exists && (flags & kOpenCreate) == 0u) return static_cast<std::int32_t>(io_error::kFileNotFound);
+        if (!exists && (flags & kOpenCreate) == 0u) {
+            // Some titles store their RDP archives on the UMD but address them
+            // through an install/save-data path on the memory stick.
+            if (const auto entry = aliased_disc_file(split.path)) {
+                file.kind = OpenFile::Kind::Disc;
+                file.disc_offset = static_cast<std::uint64_t>(entry->lba) * IsoImage::kSectorSize;
+                file.size = entry->size;
+                std::cerr << "[io] alias open " << full_path << " -> disc0:/"
+                          << entry->name << " size=" << entry->size << "\n";
+                const std::uint32_t fd = io().next_fd++;
+                io().files.emplace(fd, std::move(file));
+                return fd;
+            }
+            return static_cast<std::int32_t>(io_error::kFileNotFound);
+        }
         std::ios::openmode mode = std::ios::binary | std::ios::in;
         if ((flags & kOpenWrite) != 0u) {
             std::filesystem::create_directories(path.parent_path(), ec);
@@ -427,6 +467,27 @@ std::uint32_t read_file_op(Runtime &rt, std::uint32_t fd, std::uint32_t address,
         result = static_cast<std::uint32_t>(buffer.size());
     }
     rt.memory().copy_in(address, buffer);
+
+    // GOD EATER 2 asserts while parsing DATA.RDP. Log a bounded sample of
+    // reads from the disc-backed aliases to reveal offsets, read sizes, and
+    // the bytes returned to the guest. This does not modify the file data.
+    if (is_disc_file_alias(file) && file.alias_diagnostic_reads < 8u) {
+        std::cerr << "[rdp-debug] path=" << file.path
+                  << " offset=" << file.position
+                  << " requested=" << requested
+                  << " got=" << buffer.size()
+                  << " first_bytes=";
+        const std::size_t byte_count = std::min<std::size_t>(buffer.size(), 16u);
+        constexpr char hex[] = "0123456789ABCDEF";
+        for (std::size_t i = 0; i < byte_count; ++i) {
+            const unsigned byte = buffer[i];
+            std::cerr << hex[(byte >> 4u) & 0x0Fu] << hex[byte & 0x0Fu] << ' ';
+        }
+        if (buffer.empty()) std::cerr << "<empty>";
+        std::cerr << '\n';
+        ++file.alias_diagnostic_reads;
+    }
+
     // A disc read is what tells a load from play (kernel/fast_loading.hpp).
     if (file.kind == OpenFile::Kind::Disc) {
         load_trace::note_disc_read(buffer.size());
@@ -566,6 +627,15 @@ std::uint32_t ioctl_op(Runtime &rt, AllegrexContext &ctx) {
         std::string error;
         auto opened = pgd::PgdFile::open(header, vkey, raw_size, pgd::player_keys(), error);
         if (!opened) {
+            // GOD EATER 2 opens its disc-resident RDP archives through ms0:
+            // with the PGD-key flag, but these RDP files are not PGD containers.
+            // Preserve the raw archive view instead of failing the whole open.
+            if (error == "not a PGD file" && is_disc_file_alias(file)) {
+                log_once("rdp-raw-" + file.path, "[pgd] " + file.path +
+                         ": raw disc archive, skipping PGD decryption");
+                file.position = 0u;
+                return 0u;
+            }
             log_once("pgd-" + file.path, "[pgd] " + file.path + ": cannot decrypt: " + error +
                                              " (see docs/DESKTOP_APP.md, \"PGD data\")");
             return kPgdUnusable;
@@ -808,6 +878,9 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
                 const bool directory = std::filesystem::is_directory(host, ec);
                 write_stat(rt.memory(), arg(ctx, 1), directory, directory ? 0u : std::filesystem::file_size(host, ec), 0u);
                 result = 0u;
+            } else if (const auto entry = aliased_disc_file(split.path)) {
+                write_stat(rt.memory(), arg(ctx, 1), false, entry->size, entry->lba);
+                result = 0u;
             }
         }
         if (trace_io() || result != 0u)
@@ -933,6 +1006,26 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
     hle.add("IoFileMgrForUser", "sceIoIoctl", [](Runtime &rt, AllegrexContext &ctx) {
         kernel().finish(ctx, ioctl_op(rt, ctx));
     });
+
+    // sceNpDrmEdataGetDataSize delegates to IoIoctl(0x04100010) on PSP.
+    // Until EDAT/NPDRM decryption is implemented, report the opened file's
+    // current size rather than the generated stub's default zero. If a file
+    // filter has already been installed, file.size is its visible data size.
+    hle.add("scePspNpDrm_user", "sceNpDrmEdataGetDataSize", [](Runtime &, AllegrexContext &ctx) {
+        const std::uint32_t fd = arg(ctx, 0);
+        const auto found = io().files.find(fd);
+        if (found == io().files.end()) {
+            kernel().finish(ctx, io_error::kBadFileDescriptor);
+            return;
+        }
+        const OpenFile &file = found->second;
+        const std::uint32_t size = static_cast<std::uint32_t>(
+            std::min<std::uint64_t>(file.size, std::numeric_limits<std::uint32_t>::max()));
+        std::cerr << "[npdrm] sceNpDrmEdataGetDataSize fd=" << fd << " path=" << file.path
+                  << " size=" << size << (file.filter ? " (filtered)" : " (raw; decryption not applied)") << "\n";
+        kernel().finish(ctx, size);
+    });
+
 
     hle.add("IoFileMgrForUser", "sceIoDevctl", [](Runtime &rt, AllegrexContext &ctx) {
         const std::string device = read_cstring(rt.memory(), arg(ctx, 0), 64u);
