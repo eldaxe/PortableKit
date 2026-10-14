@@ -688,6 +688,13 @@ std::uint32_t load_decrypted_prx(Runtime &rt, std::span<const std::uint8_t> imag
             }
         }
 
+        struct ExportedFunction {
+            std::string library;
+            std::uint32_t nid{};
+            std::uint32_t address{};
+        };
+        std::vector<ExportedFunction> exported_functions;
+
         std::uint32_t module_start = 0u;
         std::uint32_t module_stop = 0u;
         std::uint32_t cursor = module->ent_top;
@@ -699,6 +706,11 @@ std::uint32_t load_decrypted_prx(Runtime &rt, std::span<const std::uint8_t> imag
                 return 0u;
             }
             const std::uint32_t entry_name = memory.load32(cursor);
+            std::string export_library;
+            if (entry_name != 0u && memory.contains(entry_name, 1u)) {
+                try { export_library = memory.read_c_string(entry_name, 128u); }
+                catch (const std::exception &) { export_library.clear(); }
+            }
             const std::uint8_t words = memory.load8(cursor + 8u);
             const std::uint8_t old_var_count = memory.load8(cursor + 9u);
             const std::uint16_t function_count = memory.load16(cursor + 10u);
@@ -743,6 +755,11 @@ std::uint32_t load_decrypted_prx(Runtime &rt, std::span<const std::uint8_t> imag
                     const std::uint32_t address = memory.load32(export_addresses + i * 4u);
                     if (nid == 0xD632ACDBu) module_start = address;
                     else if (nid == 0xCEE8593Cu) module_stop = address;
+                    if (!export_library.empty() && address != 0u &&
+                        address >= block->address && address < block_end &&
+                        memory.contains(address, 4u)) {
+                        exported_functions.push_back({export_library, nid, address});
+                    }
                 }
             }
             (void)entry_name;
@@ -764,6 +781,16 @@ std::uint32_t load_decrypted_prx(Runtime &rt, std::span<const std::uint8_t> imag
             (void)kernel().free_block(block_uid);
             reason = "module-lifecycle-export-outside-loaded-image";
             return 0u;
+        }
+
+        std::size_t registered_exports = 0u;
+        for (const auto &exported : exported_functions) {
+            if (rt.register_guest_export(exported.library, exported.nid, exported.address))
+                ++registered_exports;
+        }
+        if (registered_exports != 0u) {
+            std::cerr << "[npdrm-module] registered " << registered_exports
+                      << " guest exports for " << module->name << "\n";
         }
 
         for (const auto &import : imports)
@@ -1177,8 +1204,10 @@ void register_process(HleRegistrar &hle) {
         if (block != nullptr) {
             const std::uint32_t begin = block->address;
             const std::uint64_t end = static_cast<std::uint64_t>(begin) + block->size;
-            if (end <= 0x100000000ull)
+            if (end <= 0x100000000ull) {
                 rt.unregister_functions(begin, static_cast<std::uint32_t>(end));
+                rt.unregister_guest_exports(begin, static_cast<std::uint32_t>(end));
+            }
         }
         (void)kernel().free_block(module.memory_block);
         loaded_prx_modules.erase(found);
