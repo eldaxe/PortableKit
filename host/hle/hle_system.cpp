@@ -2,20 +2,29 @@
 // InterruptManager, scePower, sceRtc, sceImpose, sceOpenPSID and the parameter
 // part of sceUtility. sceWlanDrv is with the ad hoc calls in hle_adhoc.cpp.
 #include "../profile.hpp"
+#include "../crypto_keys.hpp"
 #include "hle_common.hpp"
 
 #include "kernel/rtc_time.hpp"
 #include "overlays.hpp"
+#include "save_data/aes128.hpp"
 
 #include "psprecomp/common.hpp"
+#include "psprecomp/elf32.hpp"
+#include "psprecomp/deflate.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstring>
 #include <ctime>
 #include <iostream>
+#include <map>
+#include <limits>
 #include <set>
+#include <span>
 #include <string>
+#include <vector>
 
 namespace portablekit {
 void register_rtc_calendar(HleRegistrar &hle);
@@ -32,6 +41,390 @@ std::uint64_t boot_unix_us() {
 std::uint64_t guest_unix_us() { return boot_unix_us() + kernel().now_us(); }
 
 void success(Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, 0u); }
+
+// sceNpDrmSetLicenseeKey stores a 16-byte key for subsequent EDAT/NPDRM operations.
+// Keep the state private to the emulated process and never print the key itself.
+std::array<std::uint8_t, 16> npdrm_licensee_key{};
+bool npdrm_licensee_key_set = false;
+
+using NpDrmBlock = std::array<std::uint8_t, 16>;
+
+NpDrmBlock npdrm_xor(const NpDrmBlock &a, const NpDrmBlock &b) {
+    NpDrmBlock out{};
+    for (std::size_t i = 0; i < out.size(); ++i) out[i] = a[i] ^ b[i];
+    return out;
+}
+
+NpDrmBlock npdrm_double(const NpDrmBlock &in) {
+    NpDrmBlock out{};
+    for (std::size_t i = 0; i < out.size(); ++i)
+        out[i] = static_cast<std::uint8_t>((in[i] << 1u) | (i + 1u < out.size() ? in[i + 1u] >> 7u : 0u));
+    if ((in[0] & 0x80u) != 0u) out[15] ^= 0x87u;
+    return out;
+}
+
+// sceNpDrmGetFixedKey's BB-MAC derivation for the NPDRM module path.
+// Kept separate from PGD's standard CMAC because BB-MAC applies its own
+// final masks and fixed-key transform.
+bool npdrm_get_fixed_key(const std::uint8_t *content_id, std::uint8_t key_mode, NpDrmBlock &out) {
+    if (key_mode > 3u) return false;
+    constexpr NpDrmBlock kirk38{
+        0x12,0x46,0x8D,0x7E,0x1C,0x42,0x20,0x9B,0xBA,0x54,0x26,0x83,0x5E,0xB0,0x33,0x03
+    };
+    constexpr NpDrmBlock mac_mask{
+        0xE3,0x50,0xED,0x1D,0x91,0x0A,0x1F,0xD0,0x29,0xBB,0x1C,0x3E,0xF3,0x40,0x77,0xFB
+    };
+    constexpr NpDrmBlock final_key{
+        0x38,0x20,0xD0,0x11,0x07,0xA3,0xFF,0x3E,0x0A,0x4C,0x20,0x85,0x39,0x10,0xB5,0x54
+    };
+    constexpr std::array<NpDrmBlock, 3> mode_keys{{
+        {0x07,0x3D,0x9E,0x9D,0xA8,0xFD,0x3B,0x2F,0x63,0x18,0x93,0x2E,0xF8,0x57,0xA6,0x64},
+        {0x37,0x49,0xB7,0x01,0xCA,0xE2,0xE0,0xC5,0x44,0x2E,0x06,0xB6,0x1E,0xFF,0x84,0xF2},
+        {0x9D,0x31,0xB8,0x5A,0xC8,0xFA,0x16,0x80,0x73,0x60,0x18,0x82,0x18,0x77,0x91,0x9D}
+    }};
+    const portablekit::savedata::Aes128 cipher(kirk38);
+    NpDrmBlock chain{};
+    for (std::size_t offset = 0; offset < 0x20u; offset += 16u) {
+        NpDrmBlock block{};
+        std::copy_n(content_id + offset, block.size(), block.begin());
+        chain = cipher.encrypt(npdrm_xor(block, chain));
+    }
+    // sceDrmBBMacUpdate keeps the final complete 16-byte block in pad
+    // (pad_size == 16); BBMacFinal therefore uses K1, without 0x80 padding.
+    const NpDrmBlock subkey = npdrm_double(cipher.encrypt(NpDrmBlock{}));
+    NpDrmBlock last{};
+    std::copy_n(content_id + 0x20u, last.size(), last.begin());
+    NpDrmBlock mac = cipher.encrypt(npdrm_xor(npdrm_xor(last, subkey), chain));
+    mac = npdrm_xor(mac, mac_mask);
+    mac = cipher.encrypt(npdrm_xor(mac, final_key));
+    if (key_mode != 0u) mac = portablekit::savedata::Aes128(mode_keys[key_mode - 1u]).encrypt(mac);
+    out = mac;
+    return true;
+}
+
+bool npdrm_derive_module_key(const std::uint8_t *edat, NpDrmBlock &out) {
+    NpDrmBlock key{};
+    if (!npdrm_get_fixed_key(edat + 0x10u, edat[0x08u], key)) return false;
+    if ((edat[0x0Fu] & 1u) != 0u) {
+        if (!npdrm_licensee_key_set) return false;
+        for (std::size_t i = 0; i < key.size(); ++i) key[i] ^= npdrm_licensee_key[i];
+    }
+    if ((edat[0x0Fu] & 2u) != 0u)
+        for (std::size_t i = 0; i < key.size(); ++i) key[i] ^= edat[0x40u + i];
+    constexpr NpDrmBlock drm_module_key{
+        0xBA,0x87,0xE4,0xAB,0x2C,0x60,0x5F,0x59,0xB8,0x3B,0xDB,0xA6,0x82,0xFD,0xAE,0x14
+    };
+    out = portablekit::savedata::Aes128(drm_module_key).decrypt(key);
+    return true;
+}
+
+using NpDrmSha1 = std::array<std::uint8_t, 20>;
+
+NpDrmSha1 npdrm_sha1(std::span<const std::uint8_t> input) {
+    std::vector<std::uint8_t> bytes(input.begin(), input.end());
+    const std::uint64_t bit_length = static_cast<std::uint64_t>(bytes.size()) * 8u;
+    bytes.push_back(0x80u);
+    while ((bytes.size() & 63u) != 56u) bytes.push_back(0u);
+    for (int shift = 56; shift >= 0; shift -= 8)
+        bytes.push_back(static_cast<std::uint8_t>(bit_length >> shift));
+    std::uint32_t h0 = 0x67452301u, h1 = 0xEFCDAB89u, h2 = 0x98BADCFEu;
+    std::uint32_t h3 = 0x10325476u, h4 = 0xC3D2E1F0u;
+    for (std::size_t offset = 0; offset < bytes.size(); offset += 64u) {
+        std::array<std::uint32_t, 80> w{};
+        for (std::size_t i = 0; i < 16u; ++i) {
+            const std::size_t p = offset + i * 4u;
+            w[i] = (static_cast<std::uint32_t>(bytes[p]) << 24u) |
+                   (static_cast<std::uint32_t>(bytes[p + 1u]) << 16u) |
+                   (static_cast<std::uint32_t>(bytes[p + 2u]) << 8u) | bytes[p + 3u];
+        }
+        for (std::size_t i = 16u; i < 80u; ++i) {
+            const std::uint32_t v = w[i - 3u] ^ w[i - 8u] ^ w[i - 14u] ^ w[i - 16u];
+            w[i] = (v << 1u) | (v >> 31u);
+        }
+        std::uint32_t a = h0, b = h1, d = h3, e = h4, cc = h2;
+        for (std::size_t i = 0; i < 80u; ++i) {
+            std::uint32_t f{}, k{};
+            if (i < 20u) { f = (b & cc) | (~b & d); k = 0x5A827999u; }
+            else if (i < 40u) { f = b ^ cc ^ d; k = 0x6ED9EBA1u; }
+            else if (i < 60u) { f = (b & cc) | (b & d) | (cc & d); k = 0x8F1BBCDCu; }
+            else { f = b ^ cc ^ d; k = 0xCA62C1D6u; }
+            const std::uint32_t rotated = (a << 5u) | (a >> 27u);
+            const std::uint32_t temp = rotated + f + e + k + w[i];
+            e = d; d = cc; cc = (b << 30u) | (b >> 2u); b = a; a = temp;
+        }
+        h0 += a; h1 += b; h2 += cc; h3 += d; h4 += e;
+    }
+    NpDrmSha1 out{};
+    const std::array<std::uint32_t, 5> words{h0, h1, h2, h3, h4};
+    for (std::size_t i = 0; i < words.size(); ++i)
+        for (std::size_t j = 0; j < 4u; ++j)
+            out[i * 4u + j] = static_cast<std::uint8_t>(words[i] >> (24u - j * 8u));
+    return out;
+}
+
+void npdrm_kirk7(std::span<std::uint8_t> data, const NpDrmBlock &key) {
+    const portablekit::savedata::Aes128 cipher(key);
+    NpDrmBlock previous{};
+    for (std::size_t offset = 0; offset < data.size(); offset += 16u) {
+        NpDrmBlock encrypted{};
+        std::copy_n(data.data() + offset, encrypted.size(), encrypted.begin());
+        NpDrmBlock plain = cipher.decrypt(encrypted);
+        for (std::size_t i = 0; i < plain.size(); ++i) data[offset + i] = plain[i] ^ previous[i];
+        previous = encrypted;
+    }
+}
+
+// Validates the decrypted PRX type-5 header used by NPDRM SPRX modules.
+
+bool npdrm_validate_sprx_header(std::span<const std::uint8_t> prx, const NpDrmBlock &module_key);
+
+NpDrmBlock npdrm_cmac(std::span<const std::uint8_t> message, const NpDrmBlock &key) {
+    const portablekit::savedata::Aes128 aes(key);
+    const NpDrmBlock zero{};
+    const NpDrmBlock l = aes.encrypt(zero);
+    auto dbl = [](const NpDrmBlock &in) {
+        NpDrmBlock out{};
+        for (std::size_t i = 0; i < 16u; ++i)
+            out[i] = static_cast<std::uint8_t>((in[i] << 1u) | (i + 1u < 16u ? in[i + 1u] >> 7u : 0u));
+        if ((in[0] & 0x80u) != 0u) out[15] ^= 0x87u;
+        return out;
+    };
+    const NpDrmBlock k1 = dbl(l);
+    const NpDrmBlock k2 = dbl(k1);
+    const std::size_t blocks = message.empty() ? 1u : (message.size() + 15u) / 16u;
+    const bool complete = !message.empty() && (message.size() % 16u == 0u);
+    NpDrmBlock previous{};
+    for (std::size_t block = 0; block + 1u < blocks; ++block) {
+        NpDrmBlock current{};
+        std::copy_n(message.data() + block * 16u, 16u, current.begin());
+        previous = aes.encrypt(npdrm_xor(previous, current));
+    }
+    NpDrmBlock last{};
+    const std::size_t last_offset = (blocks - 1u) * 16u;
+    const std::size_t remaining = message.size() > last_offset ? message.size() - last_offset : 0u;
+    if (remaining != 0u) std::copy_n(message.data() + last_offset, remaining, last.begin());
+    if (complete) last = npdrm_xor(last, k1);
+    else {
+        last[remaining] = 0x80u;
+        last = npdrm_xor(last, k2);
+    }
+    return aes.encrypt(npdrm_xor(previous, last));
+}
+
+bool npdrm_cbc_decrypt(std::span<std::uint8_t> data, const NpDrmBlock &key) {
+    if (data.empty() || (data.size() % 16u) != 0u) return false;
+    const portablekit::savedata::Aes128 aes(key);
+    NpDrmBlock previous{};
+    for (std::size_t offset = 0; offset < data.size(); offset += 16u) {
+        NpDrmBlock ciphertext{};
+        std::copy_n(data.data() + offset, 16u, ciphertext.begin());
+        NpDrmBlock plain = aes.decrypt(ciphertext);
+        for (std::size_t i = 0; i < 16u; ++i) data[offset + i] = plain[i] ^ previous[i];
+        previous = ciphertext;
+    }
+    return true;
+}
+
+// Reconstruct and decrypt the KIRK CMD1 block from a type-5 NPDRM SPRX.
+// The result is the decrypted PRX payload; ELF/module mapping is a separate step.
+bool npdrm_decrypt_type5_payload(std::span<const std::uint8_t> prx,
+                                 const NpDrmBlock &module_key,
+                                 std::vector<std::uint8_t> &payload,
+                                 std::string &reason) {
+    if (!npdrm_validate_sprx_header(prx, module_key)) {
+        reason = "type5-header-validation-failed";
+        return false;
+    }
+    const CryptoKeys *keys = crypto_keys();
+    if (keys == nullptr || !keys->kirk_cmd1.has_value()) {
+        reason = "missing-kirk-cmd1-key";
+        return false;
+    }
+    if (prx.size() < 0x150u) {
+        reason = "prx-too-small";
+        return false;
+    }
+
+    constexpr NpDrmBlock sprx_xor{
+        0x84,0x7B,0xF5,0xFE,0xE8,0x4D,0xAD,0x7A,0xB5,0x06,0x28,0x0E,0x09,0xFA,0x81,0xE1
+    };
+    constexpr NpDrmBlock tag_key{
+        0xAF,0xAD,0xCA,0xF1,0x95,0x59,0x91,0xEC,0x1B,0x27,0xD0,0x4E,0x8A,0xF3,0x3D,0xE7
+    };
+    const Key16 *kirk7_key = keys->kirk(0x6Au);
+    if (kirk7_key == nullptr) {
+        reason = "missing-kirk-slot-0x6a";
+        return false;
+    }
+    std::array<std::uint8_t, 0x90> expanded{};
+    for (std::size_t offset = 0; offset < expanded.size(); offset += 16u) {
+        std::copy(tag_key.begin(), tag_key.end(), expanded.begin() + static_cast<std::ptrdiff_t>(offset));
+        expanded[offset] = static_cast<std::uint8_t>(offset / 16u);
+    }
+    npdrm_kirk7(expanded, *kirk7_key);
+    for (std::size_t i = 0; i < expanded.size(); ++i) expanded[i] ^= module_key[i % 16u];
+
+    std::array<std::uint8_t, 0x40> encrypted_kirk_header{};
+    std::copy_n(prx.data() + 0x80u, 0x30u, encrypted_kirk_header.begin());
+    std::copy_n(prx.data() + 0xC0u, 0x10u, encrypted_kirk_header.begin() + 0x30);
+    std::array<std::uint8_t, 0x50> first{};
+    std::copy(encrypted_kirk_header.begin(), encrypted_kirk_header.end(), first.begin());
+    std::copy_n(prx.data() + 0x12Cu, 0x10u, first.begin() + 0x40);
+    for (std::size_t i = 0; i < first.size(); ++i)
+        first[i] ^= sprx_xor[i % 16u] ^ module_key[i % 16u];
+    npdrm_kirk7(first, *kirk7_key);
+    std::copy_n(first.begin(), encrypted_kirk_header.size(), encrypted_kirk_header.begin());
+
+    NpDrmBlock kirk_header{};
+    for (std::size_t i = 0; i < kirk_header.size(); ++i)
+        kirk_header[i] = encrypted_kirk_header[i] ^ expanded[0x10u + i];
+    npdrm_kirk7(kirk_header, *kirk7_key);
+    for (std::size_t i = 0; i < kirk_header.size(); ++i)
+        kirk_header[i] ^= expanded[0x50u + i];
+
+    std::vector<std::uint8_t> work(prx.begin(), prx.end());
+    constexpr std::size_t header_offset = 0x40u;
+    std::fill_n(work.begin() + header_offset, 0x90u, 0u);
+    std::copy(kirk_header.begin(), kirk_header.end(), work.begin() + header_offset);
+    std::copy_n(prx.data() + 0xB0u, 0x10u, work.begin() + header_offset + 0x70u);
+    std::copy_n(prx.data(), 0x80u, work.begin() + header_offset + 0x90u);
+    work[header_offset + 0x60u] = 1u; // KIRK_MODE_CMD1
+
+    auto read_le32 = [](const std::uint8_t *p) {
+        return static_cast<std::uint32_t>(p[0]) |
+               (static_cast<std::uint32_t>(p[1]) << 8u) |
+               (static_cast<std::uint32_t>(p[2]) << 16u) |
+               (static_cast<std::uint32_t>(p[3]) << 24u);
+    };
+    const std::uint32_t data_size = read_le32(work.data() + header_offset + 0x70u);
+    const std::uint32_t data_offset = read_le32(work.data() + header_offset + 0x74u);
+    const std::uint64_t aligned_size = (static_cast<std::uint64_t>(data_size) + 15u) & ~std::uint64_t(15u);
+    const std::uint64_t needed = header_offset + 0x90u + data_offset + aligned_size;
+    if (data_size == 0u || needed > work.size() ||
+        data_size > 64u * 1024u * 1024u) {
+        reason = "kirk-output-range-invalid";
+        return false;
+    }
+
+    NpDrmBlock encrypted_keys{};
+    std::copy_n(work.data() + header_offset, encrypted_keys.size(), encrypted_keys.begin());
+    if (!npdrm_cbc_decrypt(encrypted_keys, *keys->kirk_cmd1)) {
+        reason = "kirk-cmd1-key-decrypt-failed";
+        return false;
+    }
+    NpDrmBlock aes_key{}, cmac_key{};
+    std::copy_n(encrypted_keys.begin(), 16u, aes_key.begin());
+    std::copy_n(encrypted_keys.begin() + 16u, 16u, cmac_key.begin());
+
+    const std::span<const std::uint8_t> header_auth(
+        work.data() + header_offset + 0x60u, 0x30u);
+    const NpDrmBlock header_mac = npdrm_cmac(header_auth, cmac_key);
+    if (!std::equal(header_mac.begin(), header_mac.end(),
+                    work.begin() + header_offset + 0x20u)) {
+        reason = "kirk-header-cmac-failed";
+        return false;
+    }
+    const std::size_t data_auth_size = 0x30u + static_cast<std::size_t>(data_offset) +
+                                       static_cast<std::size_t>(aligned_size);
+    const std::span<const std::uint8_t> data_auth(
+        work.data() + header_offset + 0x60u, data_auth_size);
+    const NpDrmBlock data_mac = npdrm_cmac(data_auth, cmac_key);
+    if (!std::equal(data_mac.begin(), data_mac.end(),
+                    work.begin() + header_offset + 0x30u)) {
+        reason = "kirk-data-cmac-failed";
+        return false;
+    }
+
+    const std::size_t cipher_offset = header_offset + 0x90u + data_offset;
+    // KIRK encrypts the final partial block with zero padding. Decrypt the
+    // complete block-aligned ciphertext, then trim to the authenticated size.
+    payload.assign(work.begin() + static_cast<std::ptrdiff_t>(cipher_offset),
+                   work.begin() + static_cast<std::ptrdiff_t>(cipher_offset + aligned_size));
+    if (!npdrm_cbc_decrypt(payload, aes_key)) {
+        payload.clear();
+        reason = "kirk-payload-decrypt-failed";
+        return false;
+    }
+    payload.resize(data_size);
+    reason = "ok";
+    return true;
+}
+
+bool npdrm_validate_sprx_header(std::span<const std::uint8_t> prx, const NpDrmBlock &module_key) {
+    if (prx.size() < 0x150u || std::memcmp(prx.data(), "~PSP", 4u) != 0) return false;
+    const std::uint32_t tag = static_cast<std::uint32_t>(prx[0xD0u]) |
+        (static_cast<std::uint32_t>(prx[0xD1u]) << 8u) |
+        (static_cast<std::uint32_t>(prx[0xD2u]) << 16u) |
+        (static_cast<std::uint32_t>(prx[0xD3u]) << 24u);
+    if (tag != 0x407810F0u || prx[0x7Cu] != 23u) return false;
+    for (std::size_t i = 0xD5u; i < 0x12Cu; ++i)
+        if (prx[i] != 0u) return false;
+    const CryptoKeys *keys = crypto_keys();
+    const Key16 *kirk_key = keys != nullptr ? keys->kirk(0x6Au) : nullptr;
+    if (kirk_key == nullptr) return false;
+    constexpr NpDrmBlock tag_key{
+        0xAF,0xAD,0xCA,0xF1,0x95,0x59,0x91,0xEC,0x1B,0x27,0xD0,0x4E,0x8A,0xF3,0x3D,0xE7
+    };
+    constexpr NpDrmBlock sprx_xor{
+        0x84,0x7B,0xF5,0xFE,0xE8,0x4D,0xAD,0x7A,0xB5,0x06,0x28,0x0E,0x09,0xFA,0x81,0xE1
+    };
+    // expandSeed(tag_key, 0x6A, module_key): nine AES-CBC blocks, then xor2.
+    std::array<std::uint8_t, 0x90> expanded{};
+    for (std::size_t offset = 0; offset < expanded.size(); offset += 16u) {
+        std::copy(tag_key.begin(), tag_key.end(), expanded.begin() + static_cast<std::ptrdiff_t>(offset));
+        expanded[offset] = static_cast<std::uint8_t>(offset / 16u);
+    }
+    npdrm_kirk7(expanded, *kirk_key);
+    for (std::size_t i = 0; i < expanded.size(); ++i) expanded[i] ^= module_key[i % 16u];
+
+    std::array<std::uint8_t, 4> tag_bytes{};
+    std::copy_n(prx.data() + 0xD0u, 4u, tag_bytes.begin());
+    std::array<std::uint8_t, 0x58> empty{};
+    std::array<std::uint8_t, 0x10> id{};
+    std::array<std::uint8_t, 0x14> sha{};
+    std::array<std::uint8_t, 0x40> kirk_header{};
+    std::array<std::uint8_t, 0x10> metadata{};
+    std::array<std::uint8_t, 0x80> prx_header{};
+    std::copy_n(prx.data() + 0x140u, id.size(), id.begin());
+    std::copy_n(prx.data() + 0x12Cu, sha.size(), sha.begin());
+    std::copy_n(prx.data() + 0x80u, 0x30u, kirk_header.begin());
+    std::copy_n(prx.data() + 0xC0u, 0x10u, kirk_header.begin() + 0x30);
+    std::copy_n(prx.data() + 0xB0u, metadata.size(), metadata.begin());
+    std::copy_n(prx.data(), prx_header.size(), prx_header.begin());
+
+    std::array<std::uint8_t, 0x50> first{};
+    std::copy(kirk_header.begin(), kirk_header.end(), first.begin());
+    std::copy_n(sha.begin(), 0x10u, first.begin() + 0x40);
+    for (std::size_t i = 0; i < first.size(); ++i)
+        first[i] ^= sprx_xor[i % 16u] ^ module_key[i % 16u];
+    npdrm_kirk7(first, *kirk_key);
+    std::copy_n(first.begin(), kirk_header.size(), kirk_header.begin());
+    std::copy_n(first.begin() + 0x40, 0x10u, sha.begin());
+
+    // PRXType5::decrypt() applies xor1 to the contiguous id + SHA1 +
+    // kirkHeader region, then runs KIRK7 over all 0x60 bytes. The struct
+    // layout matters here: id is followed immediately by sha1 and kirkHeader.
+    std::array<std::uint8_t, 0x60> id_region{};
+    std::copy(id.begin(), id.end(), id_region.begin());
+    std::copy(sha.begin(), sha.end(), id_region.begin() + 0x10);
+    std::copy_n(kirk_header.begin(), 0x3Cu, id_region.begin() + 0x24);
+    for (std::size_t i = 0; i < id_region.size(); ++i) id_region[i] ^= sprx_xor[i % 16u];
+    npdrm_kirk7(id_region, *kirk_key);
+    std::copy_n(id_region.begin(), id.size(), id.begin());
+    std::copy_n(id_region.begin() + 0x10, sha.size(), sha.begin());
+    std::copy_n(id_region.begin() + 0x24, 0x3Cu, kirk_header.begin());
+
+    std::vector<std::uint8_t> hash_data;
+    hash_data.insert(hash_data.end(), tag_bytes.begin(), tag_bytes.end());
+    hash_data.insert(hash_data.end(), expanded.begin(), expanded.begin() + 0x10);
+    hash_data.insert(hash_data.end(), empty.begin(), empty.end());
+    hash_data.insert(hash_data.end(), id.begin(), id.end());
+    hash_data.insert(hash_data.end(), kirk_header.begin(), kirk_header.end());
+    hash_data.insert(hash_data.end(), metadata.begin(), metadata.end());
+    hash_data.insert(hash_data.end(), prx_header.begin(), prx_header.end());
+    const NpDrmSha1 digest = npdrm_sha1(hash_data);
+    return std::equal(digest.begin(), digest.end(), sha.begin());
+}
 
 // The console settings a game asks for and tells the system, under
 // TRACE_KERNEL: which language and which confirm button it ends up using.
@@ -78,6 +471,331 @@ void register_utils(HleRegistrar &hle) {
     });
 }
 
+
+struct LoadedPrxModule {
+    std::uint32_t uid{};
+    std::int32_t memory_block{};
+    std::uint32_t load_base{};
+    std::uint32_t start_function{};
+    std::uint32_t stop_function{};
+    std::uint32_t gp{};
+    std::string name;
+    bool started{};
+};
+
+std::map<std::uint32_t, LoadedPrxModule> loaded_prx_modules;
+
+
+bool prepare_npdrm_elf_payload(Runtime &rt, const std::vector<std::uint8_t> &payload,
+                               std::uint16_t comp_attribute, std::uint32_t elf_size,
+                               std::vector<std::uint8_t> &elf_bytes, std::string &reason) {
+    if (comp_attribute == 0u) {
+        if (payload.size() < 4u || payload[0] != 0x7Fu || payload[1] != 'E' ||
+            payload[2] != 'L' || payload[3] != 'F') {
+            reason = "uncompressed-payload-is-not-elf";
+            return false;
+        }
+        elf_bytes = payload;
+        reason = "ok";
+        return true;
+    }
+    if (elf_size == 0u || elf_size > 64u * 1024u * 1024u) {
+        reason = "declared-elf-size-out-of-range";
+        return false;
+    }
+    if (payload.size() >= 4u &&
+        (std::memcmp(payload.data(), "KL4E", 4u) == 0 ||
+         std::memcmp(payload.data(), "KL3E", 4u) == 0)) {
+        reason = "kl4e-kl3e-compression-not-yet-implemented";
+        return false;
+    }
+    if ((comp_attribute & 0x0F00u) != 0u) {
+        reason = "unsupported-prx-compression-scheme";
+        return false;
+    }
+    if (payload.size() < 18u || payload[0] != 0x1Fu || payload[1] != 0x8Bu ||
+        payload[2] != 8u) {
+        reason = "gzip-header-invalid-or-missing";
+        return false;
+    }
+    const std::uint8_t flags = payload[3];
+    if ((flags & 0xE0u) != 0u) {
+        reason = "gzip-reserved-flags-set";
+        return false;
+    }
+    std::size_t data_offset = 10u;
+    const std::size_t trailer_offset = payload.size() - 8u;
+    auto skip_zero_terminated = [&]() {
+        while (data_offset < trailer_offset && payload[data_offset] != 0u) ++data_offset;
+        if (data_offset >= trailer_offset) return false;
+        ++data_offset;
+        return true;
+    };
+    if ((flags & 0x04u) != 0u) {
+        if (data_offset + 2u > trailer_offset) {
+            reason = "gzip-extra-length-truncated";
+            return false;
+        }
+        const std::size_t extra_size = static_cast<std::size_t>(payload[data_offset]) |
+            (static_cast<std::size_t>(payload[data_offset + 1u]) << 8u);
+        data_offset += 2u;
+        if (extra_size > trailer_offset - data_offset) {
+            reason = "gzip-extra-field-truncated";
+            return false;
+        }
+        data_offset += extra_size;
+    }
+    if ((flags & 0x08u) != 0u && !skip_zero_terminated()) {
+        reason = "gzip-filename-truncated";
+        return false;
+    }
+    if ((flags & 0x10u) != 0u && !skip_zero_terminated()) {
+        reason = "gzip-comment-truncated";
+        return false;
+    }
+    if ((flags & 0x02u) != 0u) {
+        if (data_offset + 2u > trailer_offset) {
+            reason = "gzip-header-crc-truncated";
+            return false;
+        }
+        data_offset += 2u;
+    }
+    if (data_offset >= trailer_offset) {
+        reason = "gzip-deflate-stream-empty";
+        return false;
+    }
+    const std::size_t compressed_size = trailer_offset - data_offset;
+    if (compressed_size > 64u * 1024u * 1024u) {
+        reason = "gzip-input-too-large";
+        return false;
+    }
+
+    auto &memory = rt.memory();
+    const std::size_t input_alloc_size = compressed_size + 16u;
+    const std::int32_t input_uid = kernel().allocate_block("npdrm-gzip-in", 0u,
+        static_cast<std::uint32_t>(input_alloc_size), 0u);
+    if (input_uid < 0) {
+        reason = "gzip-input-allocation-failed";
+        return false;
+    }
+    const std::int32_t output_uid = kernel().allocate_block("npdrm-gzip-out", 0u, elf_size, 0u);
+    if (output_uid < 0) {
+        (void)kernel().free_block(input_uid);
+        reason = "gzip-output-allocation-failed";
+        return false;
+    }
+    const auto *input_block = kernel().find_block(input_uid);
+    const auto *output_block = kernel().find_block(output_uid);
+    if (input_block == nullptr || output_block == nullptr) {
+        (void)kernel().free_block(output_uid);
+        (void)kernel().free_block(input_uid);
+        reason = "gzip-temporary-memory-block-missing";
+        return false;
+    }
+
+    memory.copy_in(input_block->address,
+        std::span<const std::uint8_t>(payload.data() + data_offset, compressed_size));
+    memory.zero(input_block->address + static_cast<std::uint32_t>(compressed_size), 16u);
+    const psprecomp::RawDeflateResult inflated = psprecomp::inflate_raw_deflate(
+        memory, output_block->address, elf_size, input_block->address);
+    bool valid = inflated.status == psprecomp::RawDeflateStatus::Ok &&
+        inflated.output_size != 0u && inflated.output_size <= elf_size &&
+        inflated.input_consumed <= compressed_size;
+    if (valid) {
+        elf_bytes.resize(inflated.output_size);
+        for (std::uint32_t i = 0; i < inflated.output_size; ++i)
+            elf_bytes[i] = memory.load8(output_block->address + i);
+        valid = elf_bytes.size() >= 4u && elf_bytes[0] == 0x7Fu &&
+            elf_bytes[1] == 'E' && elf_bytes[2] == 'L' && elf_bytes[3] == 'F';
+    }
+    (void)kernel().free_block(output_uid);
+    (void)kernel().free_block(input_uid);
+    if (!valid) {
+        elf_bytes.clear();
+        reason = "gzip-inflate-failed-or-output-not-elf";
+        return false;
+    }
+    reason = "ok";
+    return true;
+}
+
+std::uint32_t load_decrypted_prx(Runtime &rt, std::span<const std::uint8_t> image,
+                                 const std::string &source, std::string &reason) {
+    if (image.size() < 4u || image[0] != 0x7Fu || image[1] != 'E' ||
+        image[2] != 'L' || image[3] != 'F') {
+        reason = "decrypted-payload-is-not-elf";
+        return 0u;
+    }
+
+    std::int32_t block_uid = 0;
+    try {
+        auto elf = psprecomp::Elf32Image::from_bytes(
+            std::vector<std::uint8_t>(image.begin(), image.end()), source);
+        if (!elf.is_psp_prx()) {
+            reason = "elf-is-not-a-relocatable-psp-prx";
+            return 0u;
+        }
+
+        std::uint64_t image_end = 0u;
+        for (const auto &segment : elf.segments()) {
+            if (segment.type != 1u) continue; // PT_LOAD
+            if (segment.memory_size < segment.file_size) {
+                reason = "pt-load-memsz-smaller-than-filesz";
+                return 0u;
+            }
+            image_end = std::max(image_end,
+                static_cast<std::uint64_t>(segment.vaddr) + segment.memory_size);
+        }
+        if (image_end == 0u || image_end > 64u * 1024u * 1024u) {
+            reason = "prx-load-size-out-of-range";
+            return 0u;
+        }
+        const std::uint64_t allocation_size64 = (image_end + 0xFFFu) & ~std::uint64_t(0xFFFu);
+        if (allocation_size64 == 0u || allocation_size64 > std::numeric_limits<std::uint32_t>::max()) {
+            reason = "prx-allocation-size-overflow";
+            return 0u;
+        }
+
+        const std::string module_name = source.empty() ? "npdrm-prx" : source.substr(source.find_last_of('/') == std::string::npos ? 0u : source.find_last_of('/') + 1u);
+        block_uid = kernel().allocate_block(module_name, 0u,
+            static_cast<std::uint32_t>(allocation_size64), 0u);
+        const auto *block = kernel().find_block(block_uid);
+        if (block == nullptr) {
+            reason = "prx-memory-allocation-failed";
+            return 0u;
+        }
+        const std::uint32_t load_base = block->address;
+        auto &memory = rt.memory();
+        const auto relocations = elf.load_and_relocate(memory, load_base);
+        if (relocations.invalid != 0u || relocations.unsupported != 0u) {
+            std::cerr << "[npdrm-module] " << module_name
+                      << " relocation warnings: invalid=" << relocations.invalid
+                      << " unsupported=" << relocations.unsupported << "\n";
+        }
+
+        const auto module = elf.find_module_info(memory, load_base);
+        if (!module.has_value()) {
+            (void)kernel().free_block(block_uid);
+            reason = "module-info-not-found";
+            return 0u;
+        }
+        const auto imports = elf.scan_imports(memory, *module);
+        for (const auto &import : imports) {
+            if (!memory.contains(import.stub_address, 8u)) {
+                (void)kernel().free_block(block_uid);
+                reason = "import-stub-outside-guest-memory";
+                return 0u;
+            }
+        }
+
+        std::uint32_t module_start = 0u;
+        std::uint32_t module_stop = 0u;
+        std::uint32_t cursor = module->ent_top;
+        std::uint32_t export_count = 0u;
+        while (cursor < module->ent_end) {
+            if (++export_count > 4096u || !memory.contains(cursor, 16u)) {
+                (void)kernel().free_block(block_uid);
+                reason = "invalid-export-table";
+                return 0u;
+            }
+            const std::uint32_t entry_name = memory.load32(cursor);
+            const std::uint8_t words = memory.load8(cursor + 8u);
+            const std::uint8_t old_var_count = memory.load8(cursor + 9u);
+            const std::uint16_t function_count = memory.load16(cursor + 10u);
+            const std::uint32_t resident = memory.load32(cursor + 12u);
+            if (words < 4u) {
+                (void)kernel().free_block(block_uid);
+                reason = "invalid-export-entry-size";
+                return 0u;
+            }
+            const std::uint32_t entry_bytes = static_cast<std::uint32_t>(words) * 4u;
+            if (entry_bytes > module->ent_end - cursor) {
+                (void)kernel().free_block(block_uid);
+                reason = "export-entry-outside-table";
+                return 0u;
+            }
+            std::uint32_t variable_count = old_var_count;
+            if (words > 4u) {
+                if (words < 5u) {
+                    (void)kernel().free_block(block_uid);
+                    reason = "truncated-export-entry";
+                    return 0u;
+                }
+                variable_count = std::max<std::uint32_t>(variable_count, memory.load16(cursor + 16u));
+            }
+            const std::uint64_t symbol_count = static_cast<std::uint64_t>(function_count) + variable_count;
+            const std::uint64_t symbol_bytes = symbol_count * 8u;
+            const std::uint64_t export_addresses64 =
+                static_cast<std::uint64_t>(resident) + symbol_count * 4u;
+            if (symbol_count != 0u && (resident == 0u || symbol_bytes > 1024u * 1024u ||
+                export_addresses64 > std::numeric_limits<std::uint32_t>::max() ||
+                !memory.contains(resident, static_cast<std::size_t>(symbol_count * 4u)) ||
+                !memory.contains(static_cast<std::uint32_t>(export_addresses64),
+                                 static_cast<std::size_t>(symbol_count * 4u)))) {
+                (void)kernel().free_block(block_uid);
+                reason = "invalid-export-resident-table";
+                return 0u;
+            }
+            if (symbol_count != 0u) {
+                const std::uint32_t export_addresses = static_cast<std::uint32_t>(export_addresses64);
+                for (std::uint32_t i = 0; i < function_count; ++i) {
+                    const std::uint32_t nid = memory.load32(resident + i * 4u);
+                    const std::uint32_t address = memory.load32(export_addresses + i * 4u);
+                    if (nid == 0xD632ACDBu) module_start = address;
+                    else if (nid == 0xCEE8593Cu) module_stop = address;
+                }
+            }
+            (void)entry_name;
+            cursor += entry_bytes;
+        }
+        if (cursor != module->ent_end) {
+            (void)kernel().free_block(block_uid);
+            reason = "export-table-end-misaligned";
+            return 0u;
+        }
+        const std::uint64_t block_end =
+            static_cast<std::uint64_t>(block->address) + block->size;
+        if ((module_start != 0u &&
+             (module_start < block->address || module_start >= block_end ||
+              !memory.contains(module_start, 4u))) ||
+            (module_stop != 0u &&
+             (module_stop < block->address || module_stop >= block_end ||
+              !memory.contains(module_stop, 4u)))) {
+            (void)kernel().free_block(block_uid);
+            reason = "module-lifecycle-export-outside-loaded-image";
+            return 0u;
+        }
+
+        for (const auto &import : imports)
+            (void)rt.register_import_stub(import.stub_address, import.library, import.nid);
+
+        const std::uint32_t uid = static_cast<std::uint32_t>(kernel().allocate_uid());
+        LoadedPrxModule state{};
+        state.uid = uid;
+        state.memory_block = block_uid;
+        state.load_base = load_base;
+        state.start_function = module_start;
+        state.stop_function = module_stop;
+        state.gp = module->gp;
+        state.name = module->name.empty() ? module_name : module->name;
+        loaded_prx_modules[uid] = state;
+        std::cerr << "[npdrm-module] loaded " << state.name
+                  << " uid=0x" << std::hex << uid
+                  << " base=0x" << load_base
+                  << " entry=0x" << elf.runtime_entry(load_base)
+                  << " module_start=0x" << module_start
+                  << " imports=" << std::dec << imports.size()
+                  << " rel2-invalid=" << relocations.invalid
+                  << " rel2-unsupported=" << relocations.unsupported << "\n";
+        reason = "ok";
+        return uid;
+    } catch (const std::exception &error) {
+        if (block_uid != 0) (void)kernel().free_block(block_uid);
+        reason = std::string("elf-loader-exception:") + error.what();
+        return 0u;
+    }
+}
+
 void register_process(HleRegistrar &hle) {
     hle.add("LoadExecForUser", "sceKernelRegisterExitCallback", success);
     hle.add("LoadExecForUser", "sceKernelExitGame", [](Runtime &rt, AllegrexContext &ctx) {
@@ -91,9 +809,29 @@ void register_process(HleRegistrar &hle) {
     // The main executable is the only module; overlays are loaded by game code.
     constexpr std::uint32_t kMainModuleId = 0x01000001u;
     hle.add("ModuleMgrForUser", "sceKernelGetModuleId", [](Runtime &, AllegrexContext &ctx) {
+        const std::uint32_t return_address = ctx.gpr[31];
+        for (const auto &[uid, module] : loaded_prx_modules) {
+            const auto *block = kernel().find_block(module.memory_block);
+            if (block == nullptr) continue;
+            const std::uint64_t end = static_cast<std::uint64_t>(block->address) + block->size;
+            if (return_address >= block->address && static_cast<std::uint64_t>(return_address) < end) {
+                kernel().finish(ctx, uid);
+                return;
+            }
+        }
         kernel().finish(ctx, kMainModuleId);
     });
     hle.add("ModuleMgrForUser", "sceKernelGetModuleIdByAddress", [](Runtime &, AllegrexContext &ctx) {
+        const std::uint32_t address = arg(ctx, 0);
+        for (const auto &[uid, module] : loaded_prx_modules) {
+            const auto *block = kernel().find_block(module.memory_block);
+            if (block == nullptr) continue;
+            const std::uint64_t end = static_cast<std::uint64_t>(block->address) + block->size;
+            if (address >= block->address && static_cast<std::uint64_t>(address) < end) {
+                kernel().finish(ctx, uid);
+                return;
+            }
+        }
         kernel().finish(ctx, kMainModuleId);
     });
     // Games load Sony's stock modules (font, codecs) as encrypted PRX blobs from
@@ -102,6 +840,17 @@ void register_process(HleRegistrar &hle) {
     // The name logged is the one in the module's "~PSP" header.
     const auto load_stock_module = [](AllegrexContext &ctx, const std::uint8_t *header, std::size_t count,
                                       const std::string &where) {
+        constexpr std::array<std::uint8_t, 8> edat_magic{0u, 'P', 'S', 'P', 'E', 'D', 'A', 'T'};
+        if (count >= 0x94u && std::equal(edat_magic.begin(), edat_magic.end(), header)) {
+            const std::uint8_t kind = header[0x0E];
+            std::cerr << "[npdrm-module] refusing to report encrypted wrapper as loaded" << where
+                      << " kind=" << static_cast<unsigned>(kind)
+                      << (kind == 1u ? " (PRX decryption/loader not implemented)" :
+                          kind == 3u ? " (PGD data container, not a module)" : " (unknown PSPEDAT kind)")
+                      << "\n";
+            kernel().finish(ctx, error::kIllegalArgument);
+            return;
+        }
         std::string name;
         bool recognized = false;
         for (std::size_t i = 0; i + 0x2Au < count; ++i) {
@@ -154,17 +903,206 @@ void register_process(HleRegistrar &hle) {
             kernel().finish(ctx, static_cast<std::uint32_t>(count));
             return;
         }
+        constexpr std::array<std::uint8_t, 8> edat_magic{0u, 'P', 'S', 'P', 'E', 'D', 'A', 'T'};
+        if (count >= 0x90 && std::equal(edat_magic.begin(), edat_magic.end(), header.begin())) {
+            // PPSSPP's pkg_notes documents byte 0x0E as the discriminator:
+            // 3 is a PGD/data container; 1 is the encrypted-PRX path.
+            const std::uint8_t kind = header[0x0E];
+            std::cerr << "[npdrm-module] path=" << path << " outer=PSPEDAT kind="
+                      << static_cast<unsigned>(kind)
+                      << (kind == 1u ? " (PRX)" : kind == 3u ? " (PGD/data)" : " (unknown)")
+                      << " licensee_key_set=" << (npdrm_licensee_key_set ? "yes" : "no");
+            const std::uint32_t payload_offset =
+                static_cast<std::uint32_t>(header[0x0Cu]) |
+                (static_cast<std::uint32_t>(header[0x0Du]) << 8u);
+            std::cerr << " payload_offset=0x" << std::hex << payload_offset << std::dec;
+            if (kind == 1u) {
+                NpDrmBlock module_key{};
+                const bool key_ok = npdrm_derive_module_key(header.data(), module_key);
+                std::cerr << " module_key_derived=" << (key_ok ? "yes" : "no");
+                std::array<std::uint8_t, 0x150> inner{};
+                const std::int64_t inner_count = payload_offset >= 0x90u
+                    ? read_guest_file(path, payload_offset, inner.data(), inner.size()) : -1;
+                if (inner_count >= static_cast<std::int64_t>(inner.size()) &&
+                    std::memcmp(inner.data(), "~PSP", 4u) == 0) {
+                    const std::uint32_t tag =
+                        static_cast<std::uint32_t>(inner[0xD0u]) |
+                        (static_cast<std::uint32_t>(inner[0xD1u]) << 8u) |
+                        (static_cast<std::uint32_t>(inner[0xD2u]) << 16u) |
+                        (static_cast<std::uint32_t>(inner[0xD3u]) << 24u);
+                    const std::uint32_t psp_size =
+                        static_cast<std::uint32_t>(inner[0x2Cu]) |
+                        (static_cast<std::uint32_t>(inner[0x2Du]) << 8u) |
+                        (static_cast<std::uint32_t>(inner[0x2Eu]) << 16u) |
+                        (static_cast<std::uint32_t>(inner[0x2Fu]) << 24u);
+                    const std::uint16_t comp_attribute = static_cast<std::uint16_t>(inner[6]) |
+                        static_cast<std::uint16_t>(static_cast<std::uint16_t>(inner[7]) << 8u);
+                    const std::uint32_t elf_size =
+                        static_cast<std::uint32_t>(inner[0x28u]) |
+                        (static_cast<std::uint32_t>(inner[0x29u]) << 8u) |
+                        (static_cast<std::uint32_t>(inner[0x2Au]) << 16u) |
+                        (static_cast<std::uint32_t>(inner[0x2Bu]) << 24u);
+                    std::cerr << " inner=~PSP tag=0x" << std::hex << tag
+                              << " decrypt_mode=0x" << static_cast<unsigned>(inner[0x7Cu])
+                              << " comp_attribute=0x" << comp_attribute
+                              << " elf_size=0x" << elf_size
+                              << " psp_size=0x" << psp_size << std::dec;
+                    if (key_ok) {
+                        std::vector<std::uint8_t> decrypted_payload;
+                        std::string decrypt_reason;
+                        const bool header_valid = npdrm_validate_sprx_header(inner, module_key);
+                        std::cerr << " type5_header_sha1="
+                                  << (header_valid ? "valid" : "invalid_or_unsupported");
+                        if (header_valid) {
+                            // Read the full wrapped PRX separately; the small header probe above
+                            // intentionally does not allocate according to untrusted file metadata.
+                            constexpr std::size_t kMaxPrxProbe = 64u * 1024u * 1024u;
+                            if (psp_size < 0x150u || psp_size > kMaxPrxProbe) {
+                                std::cerr << " payload_decrypt=failed payload_reason=declared-prx-size-out-of-range";
+                            } else {
+                                std::vector<std::uint8_t> full_prx(psp_size);
+                                const std::int64_t full_count = read_guest_file(
+                                    path, payload_offset, full_prx.data(), full_prx.size());
+                                if (full_count >= 0x150) {
+                                    full_prx.resize(static_cast<std::size_t>(full_count));
+                                    const bool decrypted = npdrm_decrypt_type5_payload(
+                                        full_prx, module_key, decrypted_payload, decrypt_reason);
+                                    std::cerr << " payload_decrypt=" << (decrypted ? "success" : "failed")
+                                              << " payload_reason=" << decrypt_reason;
+                                    if (decrypted) {
+                                        std::cerr << " payload_bytes=" << decrypted_payload.size();
+                                        const std::string payload_magic = decrypted_payload.size() >= 4u
+                                            ? std::string(reinterpret_cast<const char *>(decrypted_payload.data()), 4u)
+                                            : std::string("<short>");
+                                        std::cerr << " payload_magic=" << payload_magic;
+                                        std::vector<std::uint8_t> elf_bytes;
+                                        std::string prepare_reason;
+                                        if (!prepare_npdrm_elf_payload(rt, decrypted_payload,
+                                                comp_attribute, elf_size, elf_bytes, prepare_reason)) {
+                                            std::cerr << " payload_prepare=failed payload_prepare_reason="
+                                                      << prepare_reason;
+                                        } else {
+                                            std::string load_reason;
+                                            const std::uint32_t module_uid = load_decrypted_prx(
+                                                rt, elf_bytes, path, load_reason);
+                                            if (module_uid != 0u) {
+                                                std::cerr << " module_load=success module_uid=0x"
+                                                          << std::hex << module_uid << std::dec << "\n";
+                                                kernel().finish(ctx, module_uid);
+                                                return;
+                                            }
+                                            std::cerr << " module_load=failed module_reason=" << load_reason;
+                                        }
+                                    }
+                                } else {
+                                    std::cerr << " payload_decrypt=failed payload_reason=prx-read-failed";
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    std::cerr << " inner_prx_header=unavailable_or_invalid";
+                }
+            } else if (kind == 3u) {
+                std::cerr << " payload_kind=PGD-data";
+            }
+            std::cerr << "\n";
+            if (kind == 1u) {
+                // Never return a synthetic UID for a PRX that failed decryption or loading.
+                kernel().finish(ctx, error::kIllegalArgument);
+                return;
+            }
+        }
         load_stock_module(ctx, header.data(), static_cast<std::size_t>(count), " from " + path);
     };
     hle.add("ModuleMgrForUser", "sceKernelLoadModule", load_module_by_path);
     hle.add("ModuleMgrForUser", "sceKernelLoadModuleNpDrm", load_module_by_path);
-    for (const char *name : {"sceKernelStartModule", "sceKernelStopModule", "sceKernelUnloadModule"}) {
-        hle.add("ModuleMgrForUser", name, [name](Runtime &, AllegrexContext &ctx) {
-            log_once(std::string("module-op:") + name, std::string("[module] ") + name);
-            // sceKernelStartModule returns the module id it was given.
-            kernel().finish(ctx, arg(ctx, 0));
-        });
-    }
+    hle.add("ModuleMgrForUser", "sceKernelStartModule", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t uid = arg(ctx, 0);
+        auto found = loaded_prx_modules.find(uid);
+        if (found == loaded_prx_modules.end()) {
+            // Stock Sony modules whose exports are supplied by HLE retain the
+            // existing synthetic-module behavior.
+            kernel().finish(ctx, uid);
+            return;
+        }
+        LoadedPrxModule &module = found->second;
+        if (module.started) {
+            kernel().finish(ctx, 0u);
+            return;
+        }
+        if (module.start_function == 0u) {
+            module.started = true;
+            kernel().finish(ctx, 0u);
+            return;
+        }
+        const std::uint32_t status_address = arg(ctx, 3);
+        const std::uint32_t caller_gp = ctx.gpr[28];
+        const std::uint32_t module_gp = module.gp;
+        const portablekit::GuestCallArguments arguments{
+            arg(ctx, 1), arg(ctx, 2), 0u, 0u, 0u, 0u, 0u, 0u
+        };
+        const std::uint32_t entry = module.start_function;
+        ctx.set_gpr(28, module_gp);
+        kernel().call_guest(ctx, entry, arguments,
+            [uid, status_address, caller_gp, &memory = rt.memory()](AllegrexContext &return_ctx, std::uint32_t result) {
+                return_ctx.set_gpr(28, caller_gp);
+                auto state = loaded_prx_modules.find(uid);
+                if (state != loaded_prx_modules.end()) state->second.started = (result == 0u);
+                if (status_address != 0u && memory.contains(status_address, 4u))
+                    memory.store32(status_address, result);
+                kernel().finish(return_ctx, result);
+            }, 2u);
+    });
+    hle.add("ModuleMgrForUser", "sceKernelStopModule", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t uid = arg(ctx, 0);
+        auto found = loaded_prx_modules.find(uid);
+        if (found == loaded_prx_modules.end()) {
+            kernel().finish(ctx, uid);
+            return;
+        }
+        LoadedPrxModule &module = found->second;
+        if (!module.started || module.stop_function == 0u) {
+            module.started = false;
+            kernel().finish(ctx, 0u);
+            return;
+        }
+        const std::uint32_t status_address = arg(ctx, 3);
+        const std::uint32_t caller_gp = ctx.gpr[28];
+        const std::uint32_t module_gp = module.gp;
+        const portablekit::GuestCallArguments arguments{
+            arg(ctx, 1), arg(ctx, 2), 0u, 0u, 0u, 0u, 0u, 0u
+        };
+        ctx.set_gpr(28, module_gp);
+        kernel().call_guest(ctx, module.stop_function, arguments,
+            [uid, status_address, caller_gp, &memory = rt.memory()](AllegrexContext &return_ctx, std::uint32_t result) {
+                return_ctx.set_gpr(28, caller_gp);
+                auto state = loaded_prx_modules.find(uid);
+                if (state != loaded_prx_modules.end()) state->second.started = false;
+                if (status_address != 0u && memory.contains(status_address, 4u))
+                    memory.store32(status_address, result);
+                kernel().finish(return_ctx, result);
+            }, 2u);
+    });
+    hle.add("ModuleMgrForUser", "sceKernelUnloadModule", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t uid = arg(ctx, 0);
+        auto found = loaded_prx_modules.find(uid);
+        if (found == loaded_prx_modules.end()) {
+            kernel().finish(ctx, uid);
+            return;
+        }
+        const LoadedPrxModule module = found->second;
+        const auto *block = kernel().find_block(module.memory_block);
+        if (block != nullptr) {
+            const std::uint32_t begin = block->address;
+            const std::uint64_t end = static_cast<std::uint64_t>(begin) + block->size;
+            if (end <= 0x100000000ull)
+                rt.unregister_functions(begin, static_cast<std::uint32_t>(end));
+        }
+        (void)kernel().free_block(module.memory_block);
+        loaded_prx_modules.erase(found);
+        kernel().finish(ctx, 0u);
+    });
     hle.add("ModuleMgrForUser", "sceKernelStopUnloadSelfModuleWithStatus", [](Runtime &, AllegrexContext &ctx) {
         kernel().exit_current_thread(ctx, static_cast<std::int32_t>(arg(ctx, 1)), true);
     });
@@ -266,16 +1204,39 @@ void register_platform(HleRegistrar &hle) {
     // The power switch is never used here, so holding it off changes nothing.
     hle.add("sceSuspendForUser", "sceKernelPowerLock", success);
     hle.add("sceSuspendForUser", "sceKernelPowerUnlock", success);
-    // A disc game's licensee key and a PSN title's data key: nothing here
-    // decrypts with them yet. Chinatown Wars imports both.
-    hle.add("scePspNpDrm_user", "sceNpDrmSetLicenseeKey", [](Runtime &, AllegrexContext &ctx) {
-        log_once("npdrm-licensee", "[npdrm] sceNpDrmSetLicenseeKey (UNVERIFIED: no game traced yet)");
+    // NPDRM licensee-key state, type-5 header validation, KIRK CMD1 payload
+    // decryption, and initial ELF/PRX mapping and lifecycle export dispatch.
+    hle.add("scePspNpDrm_user", "sceNpDrmSetLicenseeKey", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t address = arg(ctx, 0);
+        if (address == 0u) {
+            kernel().finish(ctx, error::kIllegalArgument);
+            return;
+        }
+        for (std::uint32_t i = 0; i < npdrm_licensee_key.size(); ++i)
+            npdrm_licensee_key[i] = rt.memory().load8(address + i);
+        npdrm_licensee_key_set = true;
+        log_once("npdrm-licensee", "[npdrm] sceNpDrmSetLicenseeKey: stored 16-byte key (value redacted)");
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("scePspNpDrm_user", "sceNpDrmClearLicenseeKey", [](Runtime &, AllegrexContext &ctx) {
+        npdrm_licensee_key.fill(0u);
+        npdrm_licensee_key_set = false;
+        log_once("npdrm-licensee-clear", "[npdrm] sceNpDrmClearLicenseeKey");
         kernel().finish(ctx, 0u);
     });
     hle.add("scePspNpDrm_user", "sceNpDrmEdataSetupKey", [](Runtime &, AllegrexContext &ctx) {
         const std::uint32_t fd = arg(ctx, 0);
         const std::uint32_t result = setup_edata_file(fd);
         kernel().finish(ctx, result);
+    });
+    hle.add("scePspNpDrm_user", "sceNpDrmEdataGetDataSize", [](Runtime &, AllegrexContext &ctx) {
+        const std::uint32_t fd = arg(ctx, 0);
+        const std::uint32_t setup_result = setup_edata_file(fd);
+        if (setup_result != 0u) {
+            kernel().finish(ctx, setup_result);
+            return;
+        }
+        kernel().finish(ctx, edata_file_data_size(fd));
     });
     hle.add("sceImpose", "sceImposeSetLanguageMode", [](Runtime &, AllegrexContext &ctx) {
         if (trace_system_params())

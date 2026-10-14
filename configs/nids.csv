@@ -570,6 +570,7 @@ sceNetResolver,0x94523E09,sceNetResolverDelete
 sceNetResolver,0x244172AF,sceNetResolverCreate
 sceNetResolver,0x224C5F44,sceNetResolverStartNtoA
 scePspNpDrm_user,0xA1336091,sceNpDrmSetLicenseeKey
+scePspNpDrm_user,0x9B745542,sceNpDrmClearLicenseeKey
 scePspNpDrm_user,0x08D98894,sceNpDrmEdataSetupKey
 ThreadManForUser,0x8DAFF657,sceKernelCreateTlspl
 ThreadManForUser,0x32BF938E,sceKernelDeleteTlspl
