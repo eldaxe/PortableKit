@@ -51,6 +51,7 @@ static_assert(sizeof(ModuleInfo32) == 52);
 static_assert(sizeof(Rel32) == 8);
 
 constexpr std::uint32_t kPtLoad = 1u;
+constexpr std::uint32_t kPtPspRel2 = 0x700000A1u;
 constexpr std::uint32_t kShtNobits = 8u;
 constexpr std::uint32_t kRMips32 = 2u;
 constexpr std::uint32_t kRMips26 = 4u;
@@ -307,6 +308,177 @@ RelocationStats Elf32Image::apply_relocations(GuestMemory &memory, std::uint32_t
             memory.store32(patch_address, op);
         }
     }
+    // PSP PT_PSPREL2 uses a compact command stream instead of Elf32_Rel
+    // records. Preserve last_type across adjacent HI16 commands: two LUI
+    // instructions may share one ADDIU/LO16, as in God Eater 2.
+    for (std::size_t rel_index = 0; rel_index < segments_.size(); ++rel_index) {
+        const ElfSegment &rel_segment = segments_[rel_index];
+        if (rel_segment.type != kPtPspRel2) continue;
+        if (rel_segment.file_size < 4u) throw Error("Truncated PSP REL2 segment");
+        const auto raw = checked_span(rel_segment.offset, rel_segment.file_size);
+        const std::uint8_t flag_bits = raw[2];
+        const std::uint8_t type_bits = raw[3];
+        if (flag_bits == 0u || type_bits == 0u ||
+            static_cast<unsigned>(flag_bits) + type_bits + 1u > 16u) {
+            throw Error("Invalid PSP REL2 bit widths");
+        }
+        std::uint32_t seg_bits = 1u;
+        while ((std::uint32_t{1} << seg_bits) < rel_index) ++seg_bits;
+        if (static_cast<unsigned>(flag_bits) + type_bits + seg_bits > 16u)
+            throw Error("PSP REL2 fields exceed command width");
+
+        std::size_t cursor = 4u;
+        if (cursor >= raw.size()) throw Error("Missing PSP REL2 flag table");
+        const std::size_t flag_table_size = raw[cursor];
+        if (flag_table_size == 0u || flag_table_size > raw.size() - cursor)
+            throw Error("Invalid PSP REL2 flag table");
+        const std::size_t flag_table_offset = cursor;
+        cursor += flag_table_size;
+        if (cursor >= raw.size()) throw Error("Missing PSP REL2 type table");
+        const std::size_t type_table_size = raw[cursor];
+        if (type_table_size == 0u || type_table_size > raw.size() - cursor)
+            throw Error("Invalid PSP REL2 type table");
+        const std::size_t type_table_offset = cursor;
+        cursor += type_table_size;
+
+        std::int64_t rel_base = 0;
+        std::int32_t off_segment = -1;
+        std::int32_t last_type = -1;
+        std::int32_t lo16 = 0;
+        auto require_bytes = [&](std::size_t count) {
+            if (count > raw.size() - cursor) throw Error("Truncated PSP REL2 command stream");
+        };
+        auto read_u16 = [&]() {
+            require_bytes(2u);
+            const std::uint16_t value = static_cast<std::uint16_t>(raw[cursor]) |
+                static_cast<std::uint16_t>(static_cast<std::uint16_t>(raw[cursor + 1u]) << 8u);
+            cursor += 2u;
+            return value;
+        };
+        auto read_u32 = [&]() {
+            require_bytes(4u);
+            const std::uint32_t value = load_u32(raw.data() + cursor);
+            cursor += 4u;
+            return value;
+        };
+        while (cursor < raw.size()) {
+            const std::uint16_t command = read_u16();
+            const std::uint32_t flag_mask = (std::uint32_t{1} << flag_bits) - 1u;
+            const std::uint32_t seg_mask = (std::uint32_t{1} << seg_bits) - 1u;
+            const std::uint32_t type_mask = (std::uint32_t{1} << type_bits) - 1u;
+            std::uint32_t flag = command & flag_mask;
+            const std::uint32_t segment = (command >> flag_bits) & seg_mask;
+            std::uint32_t type = (command >> (flag_bits + seg_bits)) & type_mask;
+            if (flag >= flag_table_size || type >= type_table_size)
+                throw Error("PSP REL2 table index out of range");
+            flag = raw[flag_table_offset + flag];
+            type = raw[type_table_offset + type];
+
+            if ((flag & 1u) == 0u) {
+                off_segment = static_cast<std::int32_t>(segment);
+                if ((flag & 6u) == 0u) {
+                    rel_base = command >> (seg_bits + flag_bits);
+                } else if ((flag & 6u) == 4u) {
+                    rel_base = read_u32();
+                } else {
+                    throw Error("Invalid PSP REL2 base-size flag");
+                }
+                continue;
+            }
+
+            const std::uint32_t address_segment = segment;
+            if (address_segment >= segments_.size() ||
+                segments_[address_segment].type != kPtLoad ||
+                off_segment < 0 || static_cast<std::size_t>(off_segment) >= segments_.size() ||
+                segments_[static_cast<std::size_t>(off_segment)].type != kPtLoad) {
+                ++stats.invalid;
+                last_type = -1;
+                continue;
+            }
+            const std::uint32_t relocate_to = segment_addresses[address_segment];
+            std::int64_t rel_offset = 0;
+            const unsigned packed_shift = static_cast<unsigned>(type_bits) + seg_bits + flag_bits;
+            const std::int32_t signed_command = (command & 0x8000u) != 0u
+                ? static_cast<std::int32_t>(command) - 0x10000
+                : static_cast<std::int32_t>(command);
+            if ((flag & 6u) == 0u) {
+                rel_offset = static_cast<std::int64_t>(signed_command >> packed_shift);
+                rel_base += rel_offset;
+            } else if ((flag & 6u) == 2u) {
+                const std::int32_t high = signed_command >> packed_shift;
+                const std::uint16_t low = read_u16();
+                rel_offset = static_cast<std::int32_t>((static_cast<std::uint32_t>(high) << 16u) | low);
+                if ((low & 0x8000u) != 0u) rel_offset = static_cast<std::int32_t>(rel_offset) - 0x10000;
+                rel_base += rel_offset;
+            } else if ((flag & 6u) == 4u) {
+                rel_base = read_u32();
+            } else {
+                throw Error("Invalid PSP REL2 offset-size flag");
+            }
+
+            if (rel_base < 0 || rel_base > 0x7FFFFFFFll) {
+                ++stats.invalid;
+                last_type = -1;
+                continue;
+            }
+            const std::uint64_t patch64 = static_cast<std::uint64_t>(
+                segment_addresses[static_cast<std::size_t>(off_segment)]) +
+                static_cast<std::uint64_t>(rel_base);
+            if (patch64 > 0xFFFFFFFFull ||
+                !memory.contains(static_cast<std::uint32_t>(patch64), 4u)) {
+                ++stats.invalid;
+                last_type = -1;
+                continue;
+            }
+            const std::uint32_t patch_address = static_cast<std::uint32_t>(patch64);
+
+            if ((flag & 0x38u) == 0u) {
+                lo16 = 0;
+            } else if ((flag & 0x38u) == 8u) {
+                if (last_type != 4) lo16 = 0;
+            } else if ((flag & 0x38u) == 0x10u) {
+                lo16 = static_cast<std::int16_t>(read_u16());
+            } else {
+                throw Error("Invalid PSP REL2 LO16 encoding");
+            }
+
+            const std::uint32_t original = memory.load32(patch_address);
+            std::uint32_t op = original;
+            switch (type) {
+            case 0u:
+                break;
+            case 2u: // R_MIPS_32
+                op += relocate_to;
+                ++stats.r_mips_32;
+                break;
+            case 3u: case 6u: case 7u: // J26/JAL26
+                op = (op & 0xFC000000u) |
+                     (((op & 0x03FFFFFFu) + (relocate_to >> 2u)) & 0x03FFFFFFu);
+                if (type == 6u) op = (op & ~0xFC000000u) | 0x08000000u;
+                else if (type == 7u) op = (op & ~0xFC000000u) | 0x0C000000u;
+                ++stats.r_mips_26;
+                break;
+            case 4u: { // R_MIPS_HI16; lo16 is intentionally shared when encoded
+                std::uint32_t value = ((op << 16u) + static_cast<std::uint32_t>(lo16)) + relocate_to;
+                if ((value & 0x8000u) != 0u) value += 0x10000u;
+                op = (op & 0xFFFF0000u) | (value >> 16u);
+                ++stats.r_mips_hi16;
+                break;
+            }
+            case 1u: case 5u: // R_MIPS_LO16
+                op = (op & 0xFFFF0000u) | (((op & 0xFFFFu) + relocate_to) & 0xFFFFu);
+                ++stats.r_mips_lo16;
+                break;
+            default:
+                ++stats.unsupported;
+                last_type = static_cast<std::int32_t>(type);
+                continue;
+            }
+            if (op != original) memory.store32(patch_address, op);
+            last_type = static_cast<std::int32_t>(type);
+        }
+    }
+
     return stats;
 }
 
