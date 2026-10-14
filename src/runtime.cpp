@@ -580,16 +580,29 @@ bool Runtime::register_import_stub(std::uint32_t address, std::string library, s
 
 bool Runtime::register_guest_export(std::string library, std::uint32_t nid, std::uint32_t address) {
     if (library.empty() || address == 0u || !memory_.contains(address, 4u)) return false;
-    guest_exports_[hle_key(library, nid)] = address;
+    auto &addresses = guest_exports_[hle_key(library, nid)];
+    if (std::find(addresses.begin(), addresses.end(), address) == addresses.end())
+        addresses.push_back(address);
     return true;
 }
 
 bool Runtime::resolve_guest_export(std::string_view library, std::uint32_t nid,
                                    std::uint32_t &address) const {
     const auto found = guest_exports_.find(hle_key(library, nid));
-    if (found == guest_exports_.end()) return false;
-    address = found->second;
+    if (found == guest_exports_.end() || found->second.empty()) return false;
+    address = found->second.back();
     return true;
+}
+
+void Runtime::unregister_guest_exports(std::uint32_t start, std::uint32_t end) {
+    for (auto it = guest_exports_.begin(); it != guest_exports_.end();) {
+        auto &addresses = it->second;
+        std::erase_if(addresses, [start, end](std::uint32_t address) {
+            return address >= start && address < end;
+        });
+        if (addresses.empty()) it = guest_exports_.erase(it);
+        else ++it;
+    }
 }
 
 bool Runtime::has_function(std::uint32_t address) const { return lookup_function(address) != nullptr; }
