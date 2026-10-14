@@ -223,11 +223,15 @@ bool npdrm_validate_sprx_header(std::span<const std::uint8_t> prx, const NpDrmBl
     std::copy_n(first.begin(), kirk_header.size(), kirk_header.begin());
     std::copy_n(first.begin() + 0x40, 0x10u, sha.begin());
 
+    // PRXType5::decrypt() applies xor1 to the contiguous id + SHA1 +
+    // kirkHeader region, then runs KIRK7 over all 0x60 bytes. The struct
+    // layout matters here: id is followed immediately by sha1 and kirkHeader.
     std::array<std::uint8_t, 0x60> id_region{};
     std::copy(id.begin(), id.end(), id_region.begin());
     std::copy(sha.begin(), sha.end(), id_region.begin() + 0x10);
     std::copy_n(kirk_header.begin(), 0x3Cu, id_region.begin() + 0x24);
     for (std::size_t i = 0; i < id_region.size(); ++i) id_region[i] ^= sprx_xor[i % 16u];
+    npdrm_kirk7(id_region, *kirk_key);
     std::copy_n(id_region.begin(), id.size(), id.begin());
     std::copy_n(id_region.begin() + 0x10, sha.size(), sha.begin());
     std::copy_n(id_region.begin() + 0x24, 0x3Cu, kirk_header.begin());
