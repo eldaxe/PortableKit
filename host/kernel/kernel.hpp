@@ -45,6 +45,7 @@ inline constexpr std::uint32_t kUnknownThid = 0x80020198u;
 inline constexpr std::uint32_t kUnknownSemid = 0x80020199u;
 inline constexpr std::uint32_t kUnknownEvfid = 0x8002019Au;
 inline constexpr std::uint32_t kUnknownMbxid = 0x8002019Bu;
+inline constexpr std::uint32_t kUnknownAlmid = 0x8002019Fu;
 inline constexpr std::uint32_t kUnknownCbid = 0x800201A1u;
 inline constexpr std::uint32_t kDormant = 0x800201A2u;
 inline constexpr std::uint32_t kNotDormant = 0x800201A4u;
@@ -199,6 +200,14 @@ struct VTimer {
     std::uint32_t common{};
 };
 
+// A kernel alarm. A positive handler result rearms it relative to its
+// previous deadline, matching the PSP alarm callback convention.
+struct Alarm {
+    std::uint64_t schedule_us{};
+    std::uint32_t handler{};
+    std::uint32_t common{};
+};
+
 struct MemoryBlock {
     std::string name;
     std::uint32_t address{};
@@ -227,6 +236,8 @@ inline void load_guest_call_arguments(AllegrexContext &ctx, const GuestCallArgum
 // A guest function queued for execution in interrupt context.
 struct InterruptCall {
     std::uint32_t function{};
+    // Non-zero only for an alarm callback; lets CancelAlarm suppress pending callbacks.
+    SceUID alarm_uid{};
     GuestCallArguments arguments{};
     std::uint32_t argument_count = 4u; // how many of `arguments` it takes
     // Invoked on the host after the guest handler returns, with its v0.
@@ -323,6 +334,7 @@ public:
     std::map<SceUID, Mailbox> mailboxes;
     std::map<SceUID, Callback> callbacks;
     std::map<SceUID, VTimer> vtimers;
+    std::map<SceUID, Alarm> alarms;
     // Re-evaluates the waiters of an object after its state changed.
     void release_semaphore_waiters(SceUID uid);
     void release_event_flag_waiters(SceUID uid);
@@ -332,6 +344,7 @@ public:
     void cancel_waiters(std::deque<SceUID> &waiters, std::uint32_t result);
     [[nodiscard]] static bool event_flag_matches(std::uint32_t pattern, std::uint32_t bits, std::uint32_t mode) noexcept;
     [[nodiscard]] std::uint64_t vtimer_value(const VTimer &timer) const noexcept;
+    [[nodiscard]] std::uint32_t cancel_alarm(SceUID uid);
 
     // Memory --------------------------------------------------------------
     // type: 0 low, 1 high, 2 at address, 3 low aligned, 4 high aligned.
