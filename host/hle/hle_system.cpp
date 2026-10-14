@@ -171,7 +171,6 @@ void npdrm_kirk7(std::span<std::uint8_t> data, const NpDrmBlock &key) {
 }
 
 // Validates the decrypted PRX type-5 header used by NPDRM SPRX modules.
-// This does not decrypt the executable payload or load/execute the module.
 
 bool npdrm_validate_sprx_header(std::span<const std::uint8_t> prx, const NpDrmBlock &module_key);
 
@@ -597,18 +596,23 @@ void register_process(HleRegistrar &hle) {
                             // Read the full wrapped PRX separately; the small header probe above
                             // intentionally does not allocate according to untrusted file metadata.
                             constexpr std::size_t kMaxPrxProbe = 64u * 1024u * 1024u;
-                            std::vector<std::uint8_t> full_prx(kMaxPrxProbe);
-                            const std::int64_t full_count = read_guest_file(path, payload_offset, full_prx.data(), full_prx.size());
-                            if (full_count >= 0x150) {
-                                full_prx.resize(static_cast<std::size_t>(full_count));
-                                const bool decrypted = npdrm_decrypt_type5_payload(
-                                    full_prx, module_key, decrypted_payload, decrypt_reason);
-                                std::cerr << " payload_decrypt=" << (decrypted ? "success" : "failed")
-                                          << " payload_reason=" << decrypt_reason;
-                                if (decrypted)
-                                    std::cerr << " payload_bytes=" << decrypted_payload.size();
+                            if (psp_size < 0x150u || psp_size > kMaxPrxProbe) {
+                                std::cerr << " payload_decrypt=failed payload_reason=declared-prx-size-out-of-range";
                             } else {
-                                std::cerr << " payload_decrypt=failed payload_reason=prx-read-failed";
+                                std::vector<std::uint8_t> full_prx(psp_size);
+                                const std::int64_t full_count = read_guest_file(
+                                    path, payload_offset, full_prx.data(), full_prx.size());
+                                if (full_count >= 0x150) {
+                                    full_prx.resize(static_cast<std::size_t>(full_count));
+                                    const bool decrypted = npdrm_decrypt_type5_payload(
+                                        full_prx, module_key, decrypted_payload, decrypt_reason);
+                                    std::cerr << " payload_decrypt=" << (decrypted ? "success" : "failed")
+                                              << " payload_reason=" << decrypt_reason;
+                                    if (decrypted)
+                                        std::cerr << " payload_bytes=" << decrypted_payload.size();
+                                } else {
+                                    std::cerr << " payload_decrypt=failed payload_reason=prx-read-failed";
+                                }
                             }
                         }
                     }
