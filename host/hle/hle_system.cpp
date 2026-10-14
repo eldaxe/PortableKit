@@ -1003,12 +1003,16 @@ void register_process(HleRegistrar &hle) {
             return;
         }
         const std::uint32_t status_address = arg(ctx, 3);
+        const std::uint32_t caller_gp = ctx.gpr[28];
+        const std::uint32_t module_gp = module.gp;
         const portablekit::GuestCallArguments arguments{
             arg(ctx, 1), arg(ctx, 2), 0u, 0u, 0u, 0u, 0u, 0u
         };
         const std::uint32_t entry = module.start_function;
+        ctx.set_gpr(28, module_gp);
         kernel().call_guest(ctx, entry, arguments,
-            [uid, status_address, &memory = rt.memory()](AllegrexContext &return_ctx, std::uint32_t result) {
+            [uid, status_address, caller_gp, &memory = rt.memory()](AllegrexContext &return_ctx, std::uint32_t result) {
+                return_ctx.set_gpr(28, caller_gp);
                 auto state = loaded_prx_modules.find(uid);
                 if (state != loaded_prx_modules.end()) state->second.started = (result == 0u);
                 if (status_address != 0u && memory.contains(status_address, 4u))
@@ -1030,11 +1034,15 @@ void register_process(HleRegistrar &hle) {
             return;
         }
         const std::uint32_t status_address = arg(ctx, 3);
+        const std::uint32_t caller_gp = ctx.gpr[28];
+        const std::uint32_t module_gp = module.gp;
         const portablekit::GuestCallArguments arguments{
             arg(ctx, 1), arg(ctx, 2), 0u, 0u, 0u, 0u, 0u, 0u
         };
+        ctx.set_gpr(28, module_gp);
         kernel().call_guest(ctx, module.stop_function, arguments,
-            [uid, status_address, &memory = rt.memory()](AllegrexContext &return_ctx, std::uint32_t result) {
+            [uid, status_address, caller_gp, &memory = rt.memory()](AllegrexContext &return_ctx, std::uint32_t result) {
+                return_ctx.set_gpr(28, caller_gp);
                 auto state = loaded_prx_modules.find(uid);
                 if (state != loaded_prx_modules.end()) state->second.started = false;
                 if (status_address != 0u && memory.contains(status_address, 4u))
