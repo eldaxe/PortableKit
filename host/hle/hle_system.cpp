@@ -115,7 +115,7 @@ void register_process(HleRegistrar &hle) {
                       << " kind=" << static_cast<unsigned>(kind)
                       << (kind == 1u ? " (PRX decryption/loader not implemented)" :
                           kind == 3u ? " (PGD data container, not a module)" : " (unknown PSPEDAT kind)")
-                      << "\\n";
+                      << "\n";
             kernel().finish(ctx, error::kIllegalArgument);
             return;
         }
@@ -184,7 +184,7 @@ void register_process(HleRegistrar &hle) {
                 std::cerr << " inner_at_0x90=~PSP";
             else
                 std::cerr << " inner_at_0x90_not_~PSP_in_probe";
-            std::cerr << "\\n";
+            std::cerr << "\n";
         }
         load_stock_module(ctx, header.data(), static_cast<std::size_t>(count), " from " + path);
     };
