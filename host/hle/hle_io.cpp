@@ -861,8 +861,15 @@ std::uint32_t setup_edata_file(std::uint32_t fd) {
     const std::size_t got = read_open_file(fd, 0u, magic.data(), magic.size());
     constexpr std::array<std::uint8_t, 8> kEdatMagic{0u, 'P', 'S', 'P', 'E', 'D', 'A', 'T'};
     if (got < magic.size() || magic != kEdatMagic) {
-        if (trace_io()) std::cerr << "[npdrm] sceNpDrmEdataSetupKey: " << file.path
-                                  << " is not an EDAT container; leaving it unfiltered\n";
+        if (trace_io() || file.path.find(".EDAT") != std::string::npos ||
+            file.path.find(".edat") != std::string::npos) {
+            std::string bytes;
+            for (const std::uint8_t byte : magic)
+                bytes += " " + psprecomp::hex32(byte).substr(6u);
+            std::cerr << "[npdrm] sceNpDrmEdataSetupKey: " << file.path
+                      << " is not an EDAT container (read=" << got << "/8, magic:" << bytes
+                      << "); leaving it unfiltered\n";
+        }
         return 0u;
     }
 
@@ -1077,11 +1084,31 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
     // filter has already been installed, file.size is its visible data size.
     hle.add("scePspNpDrm_user", "sceNpDrmEdataGetDataSize", [](Runtime &, AllegrexContext &ctx) {
         const std::uint32_t fd = arg(ctx, 0);
-        const auto found = io().files.find(fd);
+        auto found = io().files.find(fd);
         if (found == io().files.end()) {
             kernel().finish(ctx, io_error::kBadFileDescriptor);
             return;
         }
+
+        // Some titles ask for the EDAT payload size without first calling
+        // sceNpDrmEdataSetupKey. Match the normal PSP setup path lazily here,
+        // but only for files that still have no filter; ordinary files and
+        // raw disc aliases keep their existing behavior.
+        if (!found->second.filter) {
+            const std::uint32_t setup_result = setup_edata_file(fd);
+            found = io().files.find(fd);
+            if (found == io().files.end()) {
+                kernel().finish(ctx, io_error::kBadFileDescriptor);
+                return;
+            }
+            if (setup_result != 0u) {
+                std::cerr << "[npdrm] sceNpDrmEdataGetDataSize: EDAT setup failed for "
+                          << found->second.path << " error=" << psprecomp::hex32(setup_result) << "\n";
+                kernel().finish(ctx, setup_result);
+                return;
+            }
+        }
+
         const OpenFile &file = found->second;
         const std::uint32_t size = static_cast<std::uint32_t>(
             std::min<std::uint64_t>(file.size, std::numeric_limits<std::uint32_t>::max()));
@@ -1089,7 +1116,6 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
                   << " size=" << size << (file.filter ? " (filtered)" : " (raw; decryption not applied)") << "\n";
         kernel().finish(ctx, size);
     });
-
 
     hle.add("IoFileMgrForUser", "sceIoDevctl", [](Runtime &rt, AllegrexContext &ctx) {
         const std::string device = read_cstring(rt.memory(), arg(ctx, 0), 64u);
