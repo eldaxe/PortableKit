@@ -173,6 +173,8 @@ void npdrm_kirk7(std::span<std::uint8_t> data, const NpDrmBlock &key) {
 // Validates the decrypted PRX type-5 header used by NPDRM SPRX modules.
 // This does not decrypt the executable payload or load/execute the module.
 
+bool npdrm_validate_sprx_header(std::span<const std::uint8_t> prx, const NpDrmBlock &module_key);
+
 NpDrmBlock npdrm_cmac(std::span<const std::uint8_t> message, const NpDrmBlock &key) {
     const portablekit::savedata::Aes128 aes(key);
     const NpDrmBlock zero{};
@@ -592,8 +594,6 @@ void register_process(HleRegistrar &hle) {
                         std::cerr << " type5_header_sha1="
                                   << (header_valid ? "valid" : "invalid_or_unsupported");
                         if (header_valid) {
-                            const std::int64_t prx_size = read_guest_file(path, payload_offset, nullptr, 0u);
-                            (void)prx_size;
                             // Read the full wrapped PRX separately; the small header probe above
                             // intentionally does not allocate according to untrusted file metadata.
                             constexpr std::size_t kMaxPrxProbe = 64u * 1024u * 1024u;
