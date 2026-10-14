@@ -172,6 +172,176 @@ void npdrm_kirk7(std::span<std::uint8_t> data, const NpDrmBlock &key) {
 
 // Validates the decrypted PRX type-5 header used by NPDRM SPRX modules.
 // This does not decrypt the executable payload or load/execute the module.
+
+NpDrmBlock npdrm_cmac(std::span<const std::uint8_t> message, const NpDrmBlock &key) {
+    const portablekit::savedata::Aes128 aes(key);
+    const NpDrmBlock zero{};
+    const NpDrmBlock l = aes.encrypt(zero);
+    auto dbl = [](const NpDrmBlock &in) {
+        NpDrmBlock out{};
+        for (std::size_t i = 0; i < 16u; ++i)
+            out[i] = static_cast<std::uint8_t>((in[i] << 1u) | (i + 1u < 16u ? in[i + 1u] >> 7u : 0u));
+        if ((in[0] & 0x80u) != 0u) out[15] ^= 0x87u;
+        return out;
+    };
+    const NpDrmBlock k1 = dbl(l);
+    const NpDrmBlock k2 = dbl(k1);
+    const std::size_t blocks = message.empty() ? 1u : (message.size() + 15u) / 16u;
+    const bool complete = !message.empty() && (message.size() % 16u == 0u);
+    NpDrmBlock previous{};
+    for (std::size_t block = 0; block + 1u < blocks; ++block) {
+        NpDrmBlock current{};
+        std::copy_n(message.data() + block * 16u, 16u, current.begin());
+        previous = aes.encrypt(npdrm_xor(previous, current));
+    }
+    NpDrmBlock last{};
+    const std::size_t last_offset = (blocks - 1u) * 16u;
+    const std::size_t remaining = message.size() > last_offset ? message.size() - last_offset : 0u;
+    if (remaining != 0u) std::copy_n(message.data() + last_offset, remaining, last.begin());
+    if (complete) last = npdrm_xor(last, k1);
+    else {
+        last[remaining] = 0x80u;
+        last = npdrm_xor(last, k2);
+    }
+    return aes.encrypt(npdrm_xor(previous, last));
+}
+
+bool npdrm_cbc_decrypt(std::span<std::uint8_t> data, const NpDrmBlock &key) {
+    if (data.empty() || (data.size() % 16u) != 0u) return false;
+    const portablekit::savedata::Aes128 aes(key);
+    NpDrmBlock previous{};
+    for (std::size_t offset = 0; offset < data.size(); offset += 16u) {
+        NpDrmBlock ciphertext{};
+        std::copy_n(data.data() + offset, 16u, ciphertext.begin());
+        NpDrmBlock plain = aes.decrypt(ciphertext);
+        for (std::size_t i = 0; i < 16u; ++i) data[offset + i] = plain[i] ^ previous[i];
+        previous = ciphertext;
+    }
+    return true;
+}
+
+// Reconstruct and decrypt the KIRK CMD1 block from a type-5 NPDRM SPRX.
+// The result is the decrypted PRX payload; ELF/module mapping is a separate step.
+bool npdrm_decrypt_type5_payload(std::span<const std::uint8_t> prx,
+                                 const NpDrmBlock &module_key,
+                                 std::vector<std::uint8_t> &payload,
+                                 std::string &reason) {
+    if (!npdrm_validate_sprx_header(prx, module_key)) {
+        reason = "type5-header-validation-failed";
+        return false;
+    }
+    const CryptoKeys *keys = crypto_keys();
+    if (keys == nullptr || !keys->kirk_cmd1.has_value()) {
+        reason = "missing-kirk-cmd1-key";
+        return false;
+    }
+    if (prx.size() < 0x150u) {
+        reason = "prx-too-small";
+        return false;
+    }
+
+    constexpr NpDrmBlock sprx_xor{
+        0x84,0x7B,0xF5,0xFE,0xE8,0x4D,0xAD,0x7A,0xB5,0x06,0x28,0x0E,0x09,0xFA,0x81,0xE1
+    };
+    constexpr NpDrmBlock tag_key{
+        0xAF,0xAD,0xCA,0xF1,0x95,0x59,0x91,0xEC,0x1B,0x27,0xD0,0x4E,0x8A,0xF3,0x3D,0xE7
+    };
+    const Key16 *kirk7_key = keys->kirk(0x6Au);
+    if (kirk7_key == nullptr) {
+        reason = "missing-kirk-slot-0x6a";
+        return false;
+    }
+    std::array<std::uint8_t, 0x90> expanded{};
+    for (std::size_t offset = 0; offset < expanded.size(); offset += 16u) {
+        std::copy(tag_key.begin(), tag_key.end(), expanded.begin() + static_cast<std::ptrdiff_t>(offset));
+        expanded[offset] = static_cast<std::uint8_t>(offset / 16u);
+    }
+    npdrm_kirk7(expanded, *kirk7_key);
+    for (std::size_t i = 0; i < expanded.size(); ++i) expanded[i] ^= module_key[i % 16u];
+
+    std::array<std::uint8_t, 0x40> encrypted_kirk_header{};
+    std::copy_n(prx.data() + 0x80u, 0x30u, encrypted_kirk_header.begin());
+    std::copy_n(prx.data() + 0xC0u, 0x10u, encrypted_kirk_header.begin() + 0x30);
+    std::array<std::uint8_t, 0x50> first{};
+    std::copy(encrypted_kirk_header.begin(), encrypted_kirk_header.end(), first.begin());
+    std::copy_n(prx.data() + 0x12Cu, 0x10u, first.begin() + 0x40);
+    for (std::size_t i = 0; i < first.size(); ++i)
+        first[i] ^= sprx_xor[i % 16u] ^ module_key[i % 16u];
+    npdrm_kirk7(first, *kirk7_key);
+    std::copy_n(first.begin(), encrypted_kirk_header.size(), encrypted_kirk_header.begin());
+
+    NpDrmBlock kirk_header{};
+    for (std::size_t i = 0; i < kirk_header.size(); ++i)
+        kirk_header[i] = encrypted_kirk_header[i] ^ expanded[0x10u + i];
+    npdrm_kirk7(kirk_header, *kirk7_key);
+    for (std::size_t i = 0; i < kirk_header.size(); ++i)
+        kirk_header[i] ^= expanded[0x50u + i];
+
+    std::vector<std::uint8_t> work(prx.begin(), prx.end());
+    constexpr std::size_t header_offset = 0x40u;
+    std::fill_n(work.begin() + header_offset, 0x90u, 0u);
+    std::copy(kirk_header.begin(), kirk_header.end(), work.begin() + header_offset);
+    std::copy_n(prx.data() + 0xB0u, 0x10u, work.begin() + header_offset + 0x70u);
+    std::copy_n(prx.data(), 0x80u, work.begin() + header_offset + 0x90u);
+    work[header_offset + 0x60u] = 1u; // KIRK_MODE_CMD1
+
+    auto read_le32 = [](const std::uint8_t *p) {
+        return static_cast<std::uint32_t>(p[0]) |
+               (static_cast<std::uint32_t>(p[1]) << 8u) |
+               (static_cast<std::uint32_t>(p[2]) << 16u) |
+               (static_cast<std::uint32_t>(p[3]) << 24u);
+    };
+    const std::uint32_t data_size = read_le32(work.data() + header_offset + 0x70u);
+    const std::uint32_t data_offset = read_le32(work.data() + header_offset + 0x74u);
+    const std::uint64_t aligned_size = (static_cast<std::uint64_t>(data_size) + 15u) & ~std::uint64_t(15u);
+    const std::uint64_t needed = header_offset + 0x90u + data_offset + aligned_size;
+    if (data_size == 0u || (data_size % 16u) != 0u || needed > work.size() ||
+        data_size > 64u * 1024u * 1024u) {
+        reason = "kirk-output-range-invalid";
+        return false;
+    }
+
+    NpDrmBlock encrypted_keys{};
+    std::copy_n(work.data() + header_offset, encrypted_keys.size(), encrypted_keys.begin());
+    if (!npdrm_cbc_decrypt(encrypted_keys, *keys->kirk_cmd1)) {
+        reason = "kirk-cmd1-key-decrypt-failed";
+        return false;
+    }
+    NpDrmBlock aes_key{}, cmac_key{};
+    std::copy_n(encrypted_keys.begin(), 16u, aes_key.begin());
+    std::copy_n(encrypted_keys.begin() + 16u, 16u, cmac_key.begin());
+
+    const std::span<const std::uint8_t> header_auth(
+        work.data() + header_offset + 0x60u, 0x30u);
+    const NpDrmBlock header_mac = npdrm_cmac(header_auth, cmac_key);
+    if (!std::equal(header_mac.begin(), header_mac.end(),
+                    work.begin() + header_offset + 0x20u)) {
+        reason = "kirk-header-cmac-failed";
+        return false;
+    }
+    const std::size_t data_auth_size = 0x30u + static_cast<std::size_t>(data_offset) +
+                                       static_cast<std::size_t>(aligned_size);
+    const std::span<const std::uint8_t> data_auth(
+        work.data() + header_offset + 0x60u, data_auth_size);
+    const NpDrmBlock data_mac = npdrm_cmac(data_auth, cmac_key);
+    if (!std::equal(data_mac.begin(), data_mac.end(),
+                    work.begin() + header_offset + 0x30u)) {
+        reason = "kirk-data-cmac-failed";
+        return false;
+    }
+
+    const std::size_t cipher_offset = header_offset + 0x90u + data_offset;
+    payload.assign(work.begin() + static_cast<std::ptrdiff_t>(cipher_offset),
+                   work.begin() + static_cast<std::ptrdiff_t>(cipher_offset + data_size));
+    if (!npdrm_cbc_decrypt(payload, aes_key)) {
+        payload.clear();
+        reason = "kirk-payload-decrypt-failed";
+        return false;
+    }
+    reason = "ok";
+    return true;
+}
+
 bool npdrm_validate_sprx_header(std::span<const std::uint8_t> prx, const NpDrmBlock &module_key) {
     if (prx.size() < 0x150u || std::memcmp(prx.data(), "~PSP", 4u) != 0) return false;
     const std::uint32_t tag = static_cast<std::uint32_t>(prx[0xD0u]) |
