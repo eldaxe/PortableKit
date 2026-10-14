@@ -13,6 +13,7 @@
 #include "portablekit/hle_extension.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <charconv>
 #include <cstdio>
@@ -413,20 +414,77 @@ static std::uint32_t read_filtered(Runtime &rt, std::uint32_t fd, OpenFile &file
 // through read_open_file.
 class PgdFilter final : public hle_extension::FileFilter {
 public:
-    PgdFilter(std::uint32_t fd, pgd::PgdFile file) : fd_(fd), file_(std::move(file)) {}
+    PgdFilter(std::uint32_t fd, std::uint64_t raw_offset, pgd::PgdFile file)
+        : fd_(fd), raw_offset_(raw_offset), file_(std::move(file)) {}
     [[nodiscard]] std::uint64_t size() const override { return file_.size(); }
     std::size_t read(std::uint64_t offset, std::uint8_t *destination, std::size_t length) override {
         const std::uint32_t fd = fd_;
+        const std::uint64_t raw_offset = raw_offset_;
         return file_.read(offset, std::span<std::uint8_t>(destination, length),
-                          [fd](std::uint64_t at, std::span<std::uint8_t> out) {
-                              return read_open_file(fd, at, out.data(), out.size());
+                          [fd, raw_offset](std::uint64_t at, std::span<std::uint8_t> out) {
+                              return read_open_file(fd, raw_offset + at, out.data(), out.size());
                           });
     }
 
 private:
     std::uint32_t fd_;
+    std::uint64_t raw_offset_;
     pgd::PgdFile file_;
 };
+
+constexpr std::uint32_t kPgdUnusable = 0x80010005u;
+
+std::uint32_t open_pgd_filter(std::uint32_t fd, std::uint64_t raw_offset,
+                              const std::optional<pgd::Block> &supplied_vkey,
+                              bool allow_raw_disc_alias) {
+    const auto found = io().files.find(fd);
+    if (found == io().files.end()) return io_error::kBadFileDescriptor;
+    OpenFile &file = found->second;
+    if (file.sector_units || (file.kind != OpenFile::Kind::Disc && file.kind != OpenFile::Kind::Host))
+        return io_error::kBadFileDescriptor;
+
+    const std::uint64_t raw_size = file.filter ? file.unfiltered_size : file.size;
+    if (raw_offset > raw_size || raw_size - raw_offset < pgd::kHeaderSize) {
+        std::cerr << "[pgd] " << file.path << ": PGD header outside file (offset=" << raw_offset
+                  << ", size=" << raw_size << ")\n";
+        return kPgdUnusable;
+    }
+
+    std::vector<std::uint8_t> header(pgd::kHeaderSize);
+    header.resize(read_open_file(fd, raw_offset, header.data(), header.size()));
+    std::string error;
+    std::optional<pgd::Block> vkey = supplied_vkey;
+    if (!vkey) vkey = pgd::derive_vkey(header, pgd::player_keys(), error);
+    if (!vkey) {
+        if (allow_raw_disc_alias && raw_offset == 0u && error == "not a PGD file" && is_disc_file_alias(file)) {
+            log_once("rdp-raw-" + file.path, "[pgd] " + file.path +
+                     ": raw disc archive, skipping PGD decryption");
+            file.position = 0u;
+            return 0u;
+        }
+        log_once("pgd-" + file.path, "[pgd] " + file.path + ": cannot derive PGD key: " + error);
+        return kPgdUnusable;
+    }
+
+    auto opened = pgd::PgdFile::open(header, *vkey, raw_size - raw_offset, pgd::player_keys(), error);
+    if (!opened) {
+        if (allow_raw_disc_alias && raw_offset == 0u && error == "not a PGD file" && is_disc_file_alias(file)) {
+            log_once("rdp-raw-" + file.path, "[pgd] " + file.path +
+                     ": raw disc archive, skipping PGD decryption");
+            file.position = 0u;
+            return 0u;
+        }
+        log_once("pgd-" + file.path, "[pgd] " + file.path + ": cannot decrypt: " + error);
+        return kPgdUnusable;
+    }
+    const std::uint32_t visible_size = opened->size();
+    if (!set_open_file_filter(fd, std::make_shared<PgdFilter>(fd, raw_offset, std::move(*opened))))
+        return io_error::kBadFileDescriptor;
+    file.position = 0u;
+    std::cerr << "[pgd] " << file.path << ": decrypted PGD payload size=" << visible_size
+              << " raw_offset=" << raw_offset << "\n";
+    return 0u;
+}
 
 std::int64_t read_guest_file(const std::string &path, std::uint64_t offset, std::uint8_t *output, std::size_t size) {
     const std::int64_t fd = open_file(path, kOpenRead);
@@ -610,40 +668,23 @@ std::uint32_t ioctl_op(Runtime &rt, AllegrexContext &ctx) {
     const auto found = io().files.find(fd);
     if (found == io().files.end()) return io_error::kBadFileDescriptor;
     OpenFile &file = found->second;
-    // PGD: the key of a file opened with flag 0x40000000. The header is read
-    // and checked; from here on reads and seeks see the decrypted data, through
-    // a file filter (hle_extension::set_file_filter). Phantasy Star Portable 2
-    // Infinity opens INSDIR/MEDIA.FPB this way.
-    if (command == pgd::kIoctlSetKey && input != 0u && input_size >= 16u && !file.sector_units &&
-        (file.kind == OpenFile::Kind::Disc || file.kind == OpenFile::Kind::Host)) {
-        // What a PSP answers for a PGD file it cannot use has not been
-        // traced: the I/O error.
-        constexpr std::uint32_t kPgdUnusable = 0x80010005u;
-        pgd::Block vkey{};
-        for (std::uint32_t i = 0; i < 16u; ++i) vkey[i] = memory.load8(input + i);
-        std::vector<std::uint8_t> header(pgd::kHeaderSize);
-        header.resize(read_open_file(fd, 0u, header.data(), header.size()));
-        const std::uint64_t raw_size = file.filter ? file.unfiltered_size : file.size;
-        std::string error;
-        auto opened = pgd::PgdFile::open(header, vkey, raw_size, pgd::player_keys(), error);
-        if (!opened) {
-            // GOD EATER 2 opens its disc-resident RDP archives through ms0:
-            // with the PGD-key flag, but these RDP files are not PGD containers.
-            // Preserve the raw archive view instead of failing the whole open.
-            if (error == "not a PGD file" && is_disc_file_alias(file)) {
-                log_once("rdp-raw-" + file.path, "[pgd] " + file.path +
-                         ": raw disc archive, skipping PGD decryption");
-                file.position = 0u;
-                return 0u;
-            }
-            log_once("pgd-" + file.path, "[pgd] " + file.path + ": cannot decrypt: " + error +
-                                             " (see docs/DESKTOP_APP.md, \"PGD data\")");
-            return kPgdUnusable;
-        }
-        if (trace_io()) std::cerr << "[io] pgd " << file.path << " size " << opened->size() << "\n";
-        (void)set_open_file_filter(fd, std::make_shared<PgdFilter>(fd, std::move(*opened)));
-        file.position = 0u;
+    // EDAT sets a PGD data offset before opening the embedded PGD. The
+    // offset is passed as a scalar in the ioctl input argument, not a pointer.
+    if (command == 0x04100002u) {
+        if (file.sector_units || (file.kind != OpenFile::Kind::Disc && file.kind != OpenFile::Kind::Host))
+            return io_error::kBadFileDescriptor;
+        file.position = input;
+        if (trace_io()) std::cerr << "[pgd] " << file.path << ": data offset=" << input << "\n";
         return 0u;
+    }
+    if (command == pgd::kIoctlSetKey) {
+        std::optional<pgd::Block> vkey;
+        if (input != 0u && input_size >= 16u) {
+            pgd::Block supplied{};
+            for (std::uint32_t i = 0; i < supplied.size(); ++i) supplied[i] = memory.load8(input + i);
+            vkey = supplied;
+        }
+        return open_pgd_filter(fd, file.position, vkey, true);
     }
     if (file.kind == OpenFile::Kind::Disc && command == 0x01010005u && input != 0u && input_size >= 12u) {
         const auto offset = static_cast<std::int64_t>(static_cast<std::uint64_t>(memory.load32(input)) |
@@ -808,6 +849,29 @@ void register_async_io(HleRegistrar &hle) {
 }
 
 } // namespace
+
+std::uint32_t setup_edata_file(std::uint32_t fd) {
+    const auto found = io().files.find(fd);
+    if (found == io().files.end()) return io_error::kBadFileDescriptor;
+    const OpenFile &file = found->second;
+    if (file.kind != OpenFile::Kind::Disc && file.kind != OpenFile::Kind::Host)
+        return io_error::kBadFileDescriptor;
+
+    std::array<std::uint8_t, 8> magic{};
+    const std::size_t got = read_open_file(fd, 0u, magic.data(), magic.size());
+    constexpr std::array<std::uint8_t, 8> kEdatMagic{0u, 'P', 'S', 'P', 'E', 'D', 'A', 'T'};
+    if (got < magic.size() || magic != kEdatMagic) {
+        if (trace_io()) std::cerr << "[npdrm] sceNpDrmEdataSetupKey: " << file.path
+                                  << " is not an EDAT container; leaving it unfiltered\n";
+        return 0u;
+    }
+
+    const std::uint32_t result = open_pgd_filter(fd, 0x90u, std::nullopt, false);
+    if (result != 0u)
+        std::cerr << "[npdrm] sceNpDrmEdataSetupKey failed for " << file.path
+                  << " error=" << psprecomp::hex32(result) << "\n";
+    return result;
+}
 
 void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, const std::filesystem::path &memory_stick) {
     if (!disc_image.empty()) io().disc = std::make_unique<IsoImage>(disc_image);

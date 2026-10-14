@@ -273,8 +273,9 @@ void register_platform(HleRegistrar &hle) {
         kernel().finish(ctx, 0u);
     });
     hle.add("scePspNpDrm_user", "sceNpDrmEdataSetupKey", [](Runtime &, AllegrexContext &ctx) {
-        log_once("npdrm-edata", "[npdrm] sceNpDrmEdataSetupKey (UNVERIFIED: no game traced yet)");
-        kernel().finish(ctx, 0u);
+        const std::uint32_t fd = arg(ctx, 0);
+        const std::uint32_t result = setup_edata_file(fd);
+        kernel().finish(ctx, result);
     });
     hle.add("sceImpose", "sceImposeSetLanguageMode", [](Runtime &, AllegrexContext &ctx) {
         if (trace_system_params())

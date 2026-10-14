@@ -59,6 +59,8 @@ private:
 // Reads from an open guest file descriptor without moving its position.
 // Returns the number of bytes read; 0 when the descriptor is unknown.
 std::size_t read_open_file(std::uint32_t fd, std::uint64_t offset, std::uint8_t *output, std::size_t size);
+// Sets up an EDAT file descriptor and installs a PGD decrypting filter when needed.
+[[nodiscard]] std::uint32_t setup_edata_file(std::uint32_t fd);
 namespace hle_extension {
 class FileFilter;
 }

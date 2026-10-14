@@ -66,6 +66,10 @@ struct KeySource {
 // The keys from crypto_keys().
 [[nodiscard]] KeySource player_keys();
 
+// Recovers the PGD version key from the header MAC when the caller has no explicit key.
+[[nodiscard]] std::optional<Block> derive_vkey(std::span<const std::uint8_t> header,
+                                                const KeySource &keys, std::string &error);
+
 // XORs `data` with the key stream of (key, vkey) from 16-byte stream position
 // `position`. Its own inverse. Empty on success, else the missing key's name.
 [[nodiscard]] std::optional<std::string> bb_cipher(const KeySource &keys, const Block &key, const Block &vkey,
