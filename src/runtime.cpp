@@ -542,6 +542,13 @@ void call_import_stub(CorpusRuntime &corpus, AllegrexContext &ctx) {
         rt.stop("No import bound at " + hex32(ctx.pc));
         return;
     }
+    std::uint32_t guest_target = 0u;
+    if (rt.resolve_guest_export(found->second.library, found->second.nid, guest_target)) {
+        // The import stub was entered by a guest JAL. Dispatch to the exported
+        // guest function with that call's original RA; it will return normally.
+        ctx.pc = guest_target;
+        return;
+    }
     const auto caller = capture_runtime_execution_context();
     const std::uint32_t stub_pc = ctx.pc;
     const std::uint32_t return_address = ctx.gpr[31];
@@ -558,6 +565,20 @@ bool Runtime::register_import_stub(std::uint32_t address, std::string library, s
     if (address == 0u || has_function(address)) return false;
     import_stubs()[address] = ImportStub{library, nid};
     register_function(address, &call_import_stub, library + "::" + hex32(nid));
+    return true;
+}
+
+bool Runtime::register_guest_export(std::string library, std::uint32_t nid, std::uint32_t address) {
+    if (library.empty() || address == 0u || !memory_.contains(address, 4u)) return false;
+    guest_exports_[hle_key(library, nid)] = address;
+    return true;
+}
+
+bool Runtime::resolve_guest_export(std::string_view library, std::uint32_t nid,
+                                   std::uint32_t &address) const {
+    const auto found = guest_exports_.find(hle_key(library, nid));
+    if (found == guest_exports_.end()) return false;
+    address = found->second;
     return true;
 }
 

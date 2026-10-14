@@ -94,6 +94,84 @@ std::uint64_t configured_max_dispatches() {
     return static_cast<std::uint64_t>(parsed);
 }
 
+// Register functions exported by the main executable. PSP PRX import stubs
+// commonly refer to a library named "main"; those imports must jump into the
+// executable's real guest code rather than being mistaken for HLE functions.
+std::size_t register_main_exports(psprecomp::Runtime &runtime,
+                                  const psprecomp::Elf32Image &elf,
+                                  std::uint32_t load_base) {
+    auto &memory = runtime.memory();
+    const auto module = elf.find_module_info(memory, load_base);
+    if (!module.has_value() || module->ent_top == 0u || module->ent_end < module->ent_top) {
+        std::cerr << "[module-export] main ELF has no valid export table\n";
+        return 0u;
+    }
+
+    std::size_t registered = 0u;
+    std::uint32_t cursor = module->ent_top;
+    std::uint32_t entries = 0u;
+    while (cursor < module->ent_end) {
+        if (++entries > 4096u || !memory.contains(cursor, 16u)) {
+            std::cerr << "[module-export] invalid main export entry at 0x"
+                      << std::hex << cursor << std::dec << "\n";
+            break;
+        }
+        const std::uint32_t library_address = memory.load32(cursor);
+        const std::uint8_t words = memory.load8(cursor + 8u);
+        const std::uint8_t old_variable_count = memory.load8(cursor + 9u);
+        const std::uint16_t function_count = memory.load16(cursor + 10u);
+        const std::uint32_t resident = memory.load32(cursor + 12u);
+        if (words < 4u) {
+            std::cerr << "[module-export] invalid entry size at 0x"
+                      << std::hex << cursor << std::dec << "\n";
+            break;
+        }
+        const std::uint32_t entry_bytes = static_cast<std::uint32_t>(words) * 4u;
+        if (entry_bytes > module->ent_end - cursor) {
+            std::cerr << "[module-export] entry exceeds export table\n";
+            break;
+        }
+        std::uint32_t variable_count = old_variable_count;
+        if (words > 4u) variable_count = std::max<std::uint32_t>(variable_count, memory.load16(cursor + 16u));
+        const std::uint64_t symbol_count = static_cast<std::uint64_t>(function_count) + variable_count;
+        const std::uint64_t address_table64 = static_cast<std::uint64_t>(resident) + symbol_count * 4u;
+        if (symbol_count != 0u &&
+            (resident == 0u || symbol_count > 131072u ||
+             address_table64 > std::numeric_limits<std::uint32_t>::max() ||
+             !memory.contains(resident, static_cast<std::size_t>(symbol_count * 4u)) ||
+             !memory.contains(static_cast<std::uint32_t>(address_table64),
+                              static_cast<std::size_t>(symbol_count * 4u)))) {
+            std::cerr << "[module-export] invalid resident table at 0x"
+                      << std::hex << resident << std::dec << "\n";
+            break;
+        }
+
+        std::string library;
+        if (library_address != 0u && memory.contains(library_address, 1u)) {
+            try { library = memory.read_c_string(library_address, 128u); }
+            catch (const std::exception &) { library.clear(); }
+        }
+        if (!library.empty() && symbol_count != 0u) {
+            const std::uint32_t address_table = static_cast<std::uint32_t>(address_table64);
+            for (std::uint32_t i = 0; i < function_count; ++i) {
+                const std::uint32_t nid = memory.load32(resident + i * 4u);
+                const std::uint32_t address = memory.load32(address_table + i * 4u);
+                if (runtime.register_guest_export(library, nid, address)) {
+                    ++registered;
+                    if (nid == 0xFFAD8F05u) {
+                        std::cerr << "[module-export] resolved " << library << "::0x"
+                                  << std::hex << nid << " -> 0x" << address << std::dec << "\n";
+                    }
+                }
+            }
+        }
+        cursor += entry_bytes;
+    }
+    std::cerr << "[module-export] registered " << registered
+              << " main ELF function exports\n";
+    return registered;
+}
+
 std::string usage() {
     const std::string app = portablekit::game().app_name;
     return "usage: " + app + " [game_dir]\n"
@@ -421,6 +499,7 @@ int main(int argc, char **argv) {
         psprecomp::Runtime runtime(ram_bytes);
         for (const EmbeddedNid &entry : kEmbeddedNids) runtime.nids().add(entry.library, entry.nid, entry.name);
         (void)elf.load_and_relocate(runtime.memory(), load_base);
+        (void)register_main_exports(runtime, elf, load_base);
         if (known_executable && variant == nullptr) {
             psprecomp::register_generated_functions(runtime);
         } else if (variant != nullptr) {
