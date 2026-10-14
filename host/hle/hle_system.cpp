@@ -108,6 +108,17 @@ void register_process(HleRegistrar &hle) {
     // The name logged is the one in the module's "~PSP" header.
     const auto load_stock_module = [](AllegrexContext &ctx, const std::uint8_t *header, std::size_t count,
                                       const std::string &where) {
+        constexpr std::array<std::uint8_t, 8> edat_magic{0u, 'P', 'S', 'P', 'E', 'D', 'A', 'T'};
+        if (count >= 0x94u && std::equal(edat_magic.begin(), edat_magic.end(), header)) {
+            const std::uint8_t kind = header[0x0E];
+            std::cerr << "[npdrm-module] refusing to report encrypted wrapper as loaded" << where
+                      << " kind=" << static_cast<unsigned>(kind)
+                      << (kind == 1u ? " (PRX decryption/loader not implemented)" :
+                          kind == 3u ? " (PGD data container, not a module)" : " (unknown PSPEDAT kind)")
+                      << "\\n";
+            kernel().finish(ctx, error::kIllegalArgument);
+            return;
+        }
         std::string name;
         bool recognized = false;
         for (std::size_t i = 0; i + 0x2Au < count; ++i) {
