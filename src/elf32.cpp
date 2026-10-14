@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <cstdlib>
 #include <fstream>
 #include <limits>
 
@@ -447,6 +448,10 @@ RelocationStats Elf32Image::apply_relocations(GuestMemory &memory, std::uint32_t
             const std::uint32_t patch_address = static_cast<std::uint32_t>(patch64);
             ++stats.total;
 
+            // Always enable REL2 tracing for Android builds where environment
+            // variables may not be practical to configure during reproduction.
+            constexpr bool trace_rel2 = true;
+
             if ((flag & 0x38u) == 0u) {
                 lo16 = 0;
             } else if ((flag & 0x38u) == 8u) {
@@ -459,6 +464,16 @@ RelocationStats Elf32Image::apply_relocations(GuestMemory &memory, std::uint32_t
 
             const std::uint32_t original = memory.load32(patch_address);
             std::uint32_t op = original;
+            if (trace_rel2) {
+                std::cerr << "[rel2] seg=" << address_segment
+                          << " patch-seg=" << off_segment
+                          << " address=0x" << std::hex << patch_address
+                          << " target=0x" << relocate_to
+                          << " type=" << std::dec << type
+                          << " flag=0x" << std::hex << flag
+                          << " lo16=0x" << static_cast<std::uint16_t>(lo16)
+                          << " before=0x" << original << '\n';
+            }
             switch (type) {
             case 0u:
                 break;
@@ -490,6 +505,11 @@ RelocationStats Elf32Image::apply_relocations(GuestMemory &memory, std::uint32_t
                 continue;
             }
             if (op != original) memory.store32(patch_address, op);
+            if (trace_rel2) {
+                std::cerr << "[rel2] address=0x" << std::hex << patch_address
+                          << " after=0x" << op
+                          << (op == original ? " unchanged" : " relocated") << '\n';
+            }
             last_type = static_cast<std::int32_t>(type);
         }
     }
