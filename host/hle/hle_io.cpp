@@ -898,7 +898,7 @@ std::uint32_t setup_edata_file(std::uint32_t fd) {
     if (header_size == header.size() && header[0x0E] == 1u) {
         std::cerr << "[npdrm] " << file.path
                   << ": PSPEDAT kind=1 (encrypted PRX); must use NPDRM module loader, not PGD filter\n";
-        return 0u;
+        return kPgdUnusable;
     }
     if (header_size == header.size() && header[0x0E] != 3u) {
         std::cerr << "[npdrm] " << file.path << ": unknown PSPEDAT kind="
