@@ -446,7 +446,7 @@ std::uint32_t open_pgd_filter(std::uint32_t fd, std::uint64_t raw_offset,
     const std::uint64_t raw_size = file.filter ? file.unfiltered_size : file.size;
     if (raw_offset > raw_size || raw_size - raw_offset < pgd::kHeaderSize) {
         std::cerr << "[pgd] " << file.path << ": PGD header outside file (offset=" << raw_offset
-                  << ", size=" << raw_size << ")\\n";
+                  << ", size=" << raw_size << ")\n";
         return kPgdUnusable;
     }
 
@@ -482,7 +482,7 @@ std::uint32_t open_pgd_filter(std::uint32_t fd, std::uint64_t raw_offset,
         return io_error::kBadFileDescriptor;
     file.position = 0u;
     std::cerr << "[pgd] " << file.path << ": decrypted PGD payload size=" << visible_size
-              << " raw_offset=" << raw_offset << "\\n";
+              << " raw_offset=" << raw_offset << "\n";
     return 0u;
 }
 
@@ -674,7 +674,7 @@ std::uint32_t ioctl_op(Runtime &rt, AllegrexContext &ctx) {
         if (file.sector_units || (file.kind != OpenFile::Kind::Disc && file.kind != OpenFile::Kind::Host))
             return io_error::kBadFileDescriptor;
         file.position = input;
-        if (trace_io()) std::cerr << "[pgd] " << file.path << ": data offset=" << input << "\\n";
+        if (trace_io()) std::cerr << "[pgd] " << file.path << ": data offset=" << input << "\n";
         return 0u;
     }
     if (command == pgd::kIoctlSetKey) {
@@ -862,14 +862,14 @@ std::uint32_t setup_edata_file(std::uint32_t fd) {
     constexpr std::array<std::uint8_t, 8> kEdatMagic{0u, 'P', 'S', 'P', 'E', 'D', 'A', 'T'};
     if (got < magic.size() || magic != kEdatMagic) {
         if (trace_io()) std::cerr << "[npdrm] sceNpDrmEdataSetupKey: " << file.path
-                                  << " is not an EDAT container; leaving it unfiltered\\n";
+                                  << " is not an EDAT container; leaving it unfiltered\n";
         return 0u;
     }
 
     const std::uint32_t result = open_pgd_filter(fd, 0x90u, std::nullopt, false);
     if (result != 0u)
         std::cerr << "[npdrm] sceNpDrmEdataSetupKey failed for " << file.path
-                  << " error=" << psprecomp::hex32(result) << "\\n";
+                  << " error=" << psprecomp::hex32(result) << "\n";
     return result;
 }
 
