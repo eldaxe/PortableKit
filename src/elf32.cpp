@@ -9,6 +9,10 @@
 #include <iostream>
 #include <limits>
 
+#ifndef PSPPRECOMP_TRACE_REL2
+#define PSPPRECOMP_TRACE_REL2 0
+#endif
+
 namespace psprecomp {
 namespace {
 #pragma pack(push, 1)
