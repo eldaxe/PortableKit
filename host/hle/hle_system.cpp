@@ -6,6 +6,7 @@
 
 #include "kernel/rtc_time.hpp"
 #include "overlays.hpp"
+#include "save_data/aes128.hpp"
 
 #include "psprecomp/common.hpp"
 
@@ -38,6 +39,76 @@ void success(Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, 0u); }
 // Keep the state private to the emulated process and never print the key itself.
 std::array<std::uint8_t, 16> npdrm_licensee_key{};
 bool npdrm_licensee_key_set = false;
+
+using NpDrmBlock = std::array<std::uint8_t, 16>;
+
+NpDrmBlock npdrm_xor(const NpDrmBlock &a, const NpDrmBlock &b) {
+    NpDrmBlock out{};
+    for (std::size_t i = 0; i < out.size(); ++i) out[i] = a[i] ^ b[i];
+    return out;
+}
+
+NpDrmBlock npdrm_double(const NpDrmBlock &in) {
+    NpDrmBlock out{};
+    for (std::size_t i = 0; i < out.size(); ++i)
+        out[i] = static_cast<std::uint8_t>((in[i] << 1u) | (i + 1u < out.size() ? in[i + 1u] >> 7u : 0u));
+    if ((in[0] & 0x80u) != 0u) out[15] ^= 0x87u;
+    return out;
+}
+
+// sceNpDrmGetFixedKey's BB-MAC derivation for the NPDRM module path.
+// Kept separate from PGD's standard CMAC because BB-MAC applies its own
+// final masks and fixed-key transform.
+bool npdrm_get_fixed_key(const std::uint8_t *content_id, std::uint8_t key_mode, NpDrmBlock &out) {
+    if (key_mode > 3u) return false;
+    constexpr NpDrmBlock kirk38{
+        0x12,0x46,0x8D,0x7E,0x1C,0x42,0x20,0x9B,0xBA,0x54,0x26,0x83,0x5E,0xB0,0x33,0x03
+    };
+    constexpr NpDrmBlock mac_mask{
+        0xE3,0x50,0xED,0x1D,0x91,0x0A,0x1F,0xD0,0x29,0xBB,0x1C,0x3E,0xF3,0x40,0x77,0xFB
+    };
+    constexpr NpDrmBlock final_key{
+        0x38,0x20,0xD0,0x11,0x07,0xA3,0xFF,0x3E,0x0A,0x4C,0x20,0x85,0x39,0x10,0xB5,0x54
+    };
+    constexpr std::array<NpDrmBlock, 3> mode_keys{{
+        {0x07,0x3D,0x9E,0x9D,0xA8,0xFD,0x3B,0x2F,0x63,0x18,0x93,0x2E,0xF8,0x57,0xA6,0x64},
+        {0x37,0x49,0xB7,0x01,0xCA,0xE2,0xE0,0xC5,0x44,0x2E,0x06,0xB6,0x1E,0xFF,0x84,0xF2},
+        {0x9D,0x31,0xB8,0x5A,0xC8,0xFA,0x16,0x80,0x73,0x60,0x18,0x82,0x18,0x77,0x91,0x9D}
+    }};
+    const portablekit::savedata::Aes128 cipher(kirk38);
+    NpDrmBlock chain{};
+    for (std::size_t offset = 0; offset < 0x20u; offset += 16u) {
+        NpDrmBlock block{};
+        std::copy_n(content_id + offset, block.size(), block.begin());
+        chain = cipher.encrypt(npdrm_xor(block, chain));
+    }
+    // Content ID is 0x30 bytes (three complete blocks), so use BB-MAC K1.
+    const NpDrmBlock subkey = npdrm_double(cipher.encrypt(NpDrmBlock{}));
+    NpDrmBlock last{};
+    std::copy_n(content_id + 0x20u, last.size(), last.begin());
+    NpDrmBlock mac = cipher.encrypt(npdrm_xor(npdrm_xor(last, subkey), chain));
+    mac = npdrm_xor(mac, mac_mask);
+    mac = cipher.encrypt(npdrm_xor(mac, final_key));
+    if (key_mode != 0u) mac = portablekit::savedata::Aes128(mode_keys[key_mode - 1u]).encrypt(mac);
+    out = mac;
+    return true;
+}
+
+bool npdrm_derive_module_key(const std::uint8_t *edat, NpDrmBlock &out) {
+    NpDrmBlock key{};
+    if (!npdrm_get_fixed_key(edat + 0x10u, edat[0x08u], key)) return false;
+    if ((edat[0x0Fu] & 1u) != 0u) {
+        if (!npdrm_licensee_key_set) return false;
+        for (std::size_t i = 0; i < key.size(); ++i) key[i] ^= npdrm_licensee_key[i];
+    }
+    if ((edat[0x0Fu] & 2u) != 0u)
+        for (std::size_t i = 0; i < key.size(); ++i) key[i] ^= edat[0x40u + i];
+    constexpr NpDrmBlock drm_module_key{
+        0xBA,0x87,0xE4,0xAB,0x2C,0x60,0x5F,0x59,0xB8,0x3B,0xDB,0xA6,0x82,0xFD,0xAE,0x14
+    };
+    out = portablekit::savedata::Aes128(drm_module_key).decrypt(key);
+    return true;
+}
 
 // The console settings a game asks for and tells the system, under
 // TRACE_KERNEL: which language and which confirm button it ends up using.
@@ -180,6 +251,11 @@ void register_process(HleRegistrar &hle) {
                       << static_cast<unsigned>(kind)
                       << (kind == 1u ? " (PRX)" : kind == 3u ? " (PGD/data)" : " (unknown)")
                       << " licensee_key_set=" << (npdrm_licensee_key_set ? "yes" : "no");
+            if (kind == 1u) {
+                NpDrmBlock module_key{};
+                std::cerr << " module_key_derived="
+                          << (npdrm_derive_module_key(header.data(), module_key) ? "yes" : "no");
+            }
             if (count >= 0x94 && std::memcmp(header.data() + 0x90, "~PSP", 4u) == 0)
                 std::cerr << " inner_at_0x90=~PSP";
             else
