@@ -9,6 +9,7 @@
 
 #include "psprecomp/common.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstring>
@@ -161,18 +162,17 @@ void register_process(HleRegistrar &hle) {
         }
         constexpr std::array<std::uint8_t, 8> edat_magic{0u, 'P', 'S', 'P', 'E', 'D', 'A', 'T'};
         if (count >= 0x90 && std::equal(edat_magic.begin(), edat_magic.end(), header.begin())) {
-            const std::uint32_t payload_offset = static_cast<std::uint32_t>(header[0x0C]) |
-                                                 (static_cast<std::uint32_t>(header[0x0D]) << 8u);
-            std::cerr << "[npdrm-module] path=" << path << " outer=PSPEDAT key_mode="
-                      << static_cast<unsigned>(header[0x08]) << " payload_offset=0x" << std::hex << payload_offset
-                      << " flags=0x" << static_cast<unsigned>(header[0x0F]) << std::dec
+            // PPSSPP's pkg_notes documents byte 0x0E as the discriminator:
+            // 3 is a PGD/data container; 1 is the encrypted-PRX path.
+            const std::uint8_t kind = header[0x0E];
+            std::cerr << "[npdrm-module] path=" << path << " outer=PSPEDAT kind="
+                      << static_cast<unsigned>(kind)
+                      << (kind == 1u ? " (PRX)" : kind == 3u ? " (PGD/data)" : " (unknown)")
                       << " licensee_key_set=" << (npdrm_licensee_key_set ? "yes" : "no");
-            if (payload_offset + 4u <= static_cast<std::uint32_t>(count) &&
-                std::memcmp(header.data() + payload_offset, "~PSP", 4u) == 0) {
-                std::cerr << " inner=~PSP";
-            } else {
-                std::cerr << " inner_header_not_in_probe";
-            }
+            if (count >= 0x94 && std::memcmp(header.data() + 0x90, "~PSP", 4u) == 0)
+                std::cerr << " inner_at_0x90=~PSP";
+            else
+                std::cerr << " inner_at_0x90_not_~PSP_in_probe";
             std::cerr << "\\n";
         }
         load_stock_module(ctx, header.data(), static_cast<std::size_t>(count), " from " + path);
