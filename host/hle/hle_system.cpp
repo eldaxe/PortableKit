@@ -10,6 +10,7 @@
 #include "save_data/aes128.hpp"
 
 #include "psprecomp/common.hpp"
+#include "psprecomp/elf32.hpp"
 
 #include <algorithm>
 #include <array>
@@ -17,6 +18,8 @@
 #include <cstring>
 #include <ctime>
 #include <iostream>
+#include <map>
+#include <limits>
 #include <set>
 #include <span>
 #include <string>
@@ -462,6 +465,183 @@ void register_utils(HleRegistrar &hle) {
     hle.add("UtilsForUser", "sceKernelLibcClock", [](Runtime &, AllegrexContext &ctx) {
         kernel().finish(ctx, static_cast<std::uint32_t>(kernel().now_us()));
     });
+}
+
+
+struct LoadedPrxModule {
+    std::uint32_t uid{};
+    std::int32_t memory_block{};
+    std::uint32_t load_base{};
+    std::uint32_t start_function{};
+    std::uint32_t stop_function{};
+    std::uint32_t gp{};
+    std::string name;
+    bool started{};
+};
+
+std::map<std::uint32_t, LoadedPrxModule> loaded_prx_modules;
+
+std::uint32_t load_decrypted_prx(Runtime &rt, std::span<const std::uint8_t> image,
+                                 const std::string &source, std::string &reason) {
+    if (image.size() < 4u || image[0] != 0x7Fu || image[1] != 'E' ||
+        image[2] != 'L' || image[3] != 'F') {
+        reason = "decrypted-payload-is-not-elf";
+        return 0u;
+    }
+
+    std::int32_t block_uid = 0;
+    try {
+        auto elf = psprecomp::Elf32Image::from_bytes(
+            std::vector<std::uint8_t>(image.begin(), image.end()), source);
+        if (!elf.is_psp_prx()) {
+            reason = "elf-is-not-a-relocatable-psp-prx";
+            return 0u;
+        }
+
+        std::uint64_t image_end = 0u;
+        for (const auto &segment : elf.segments()) {
+            if (segment.type != 1u) continue; // PT_LOAD
+            if (segment.memory_size < segment.file_size) {
+                reason = "pt-load-memsz-smaller-than-filesz";
+                return 0u;
+            }
+            image_end = std::max(image_end,
+                static_cast<std::uint64_t>(segment.vaddr) + segment.memory_size);
+        }
+        if (image_end == 0u || image_end > 64u * 1024u * 1024u) {
+            reason = "prx-load-size-out-of-range";
+            return 0u;
+        }
+        const std::uint64_t allocation_size64 = (image_end + 0xFFFu) & ~std::uint64_t(0xFFFu);
+        if (allocation_size64 == 0u || allocation_size64 > std::numeric_limits<std::uint32_t>::max()) {
+            reason = "prx-allocation-size-overflow";
+            return 0u;
+        }
+
+        const std::string module_name = source.empty() ? "npdrm-prx" : source.substr(source.find_last_of('/') == std::string::npos ? 0u : source.find_last_of('/') + 1u);
+        block_uid = kernel().allocate_block(module_name, 0u,
+            static_cast<std::uint32_t>(allocation_size64), 0u);
+        const auto *block = kernel().find_block(block_uid);
+        if (block == nullptr) {
+            reason = "prx-memory-allocation-failed";
+            return 0u;
+        }
+        const std::uint32_t load_base = block->address;
+        auto &memory = rt.memory();
+        const auto relocations = elf.load_and_relocate(memory, load_base);
+        if (relocations.invalid != 0u || relocations.unsupported != 0u) {
+            std::cerr << "[npdrm-module] " << module_name
+                      << " relocation warnings: invalid=" << relocations.invalid
+                      << " unsupported=" << relocations.unsupported << "\n";
+        }
+
+        const auto module = elf.find_module_info(memory, load_base);
+        if (!module.has_value()) {
+            (void)kernel().free_block(block_uid);
+            reason = "module-info-not-found";
+            return 0u;
+        }
+        const auto imports = elf.scan_imports(memory, *module);
+        for (const auto &import : imports) {
+            if (!memory.contains(import.stub_address, 8u)) {
+                (void)kernel().free_block(block_uid);
+                reason = "import-stub-outside-guest-memory";
+                return 0u;
+            }
+        }
+
+        std::uint32_t module_start = 0u;
+        std::uint32_t module_stop = 0u;
+        std::uint32_t cursor = module->ent_top;
+        std::uint32_t export_count = 0u;
+        while (cursor < module->ent_end) {
+            if (++export_count > 4096u || !memory.contains(cursor, 16u)) {
+                (void)kernel().free_block(block_uid);
+                reason = "invalid-export-table";
+                return 0u;
+            }
+            const std::uint32_t entry_name = memory.load32(cursor);
+            const std::uint8_t words = memory.load8(cursor + 8u);
+            const std::uint8_t old_var_count = memory.load8(cursor + 9u);
+            const std::uint16_t function_count = memory.load16(cursor + 10u);
+            const std::uint32_t resident = memory.load32(cursor + 12u);
+            if (words < 4u) {
+                (void)kernel().free_block(block_uid);
+                reason = "invalid-export-entry-size";
+                return 0u;
+            }
+            const std::uint32_t entry_bytes = static_cast<std::uint32_t>(words) * 4u;
+            if (entry_bytes > module->ent_end - cursor) {
+                (void)kernel().free_block(block_uid);
+                reason = "export-entry-outside-table";
+                return 0u;
+            }
+            std::uint32_t variable_count = old_var_count;
+            if (words > 4u) {
+                if (words < 5u) {
+                    (void)kernel().free_block(block_uid);
+                    reason = "truncated-export-entry";
+                    return 0u;
+                }
+                variable_count = std::max<std::uint32_t>(variable_count, memory.load16(cursor + 16u));
+            }
+            const std::uint64_t symbol_count = static_cast<std::uint64_t>(function_count) + variable_count;
+            const std::uint64_t symbol_bytes = symbol_count * 8u;
+            if (symbol_count != 0u && (resident == 0u || symbol_bytes > 1024u * 1024u ||
+                !memory.contains(resident, static_cast<std::size_t>(symbol_count * 4u)) ||
+                !memory.contains(resident + static_cast<std::uint32_t>(symbol_count * 4u),
+                                 static_cast<std::size_t>(symbol_count * 4u)))) {
+                (void)kernel().free_block(block_uid);
+                reason = "invalid-export-resident-table";
+                return 0u;
+            }
+            if (symbol_count != 0u) {
+                const std::uint32_t export_addresses =
+                    resident + static_cast<std::uint32_t>(symbol_count * 4u);
+                for (std::uint32_t i = 0; i < function_count; ++i) {
+                    const std::uint32_t nid = memory.load32(resident + i * 4u);
+                    const std::uint32_t address = memory.load32(export_addresses + i * 4u);
+                    if (nid == 0xD632ACDBu) module_start = address;
+                    else if (nid == 0xCEE8593Cu) module_stop = address;
+                }
+            }
+            (void)entry_name;
+            cursor += entry_bytes;
+        }
+        if (cursor != module->ent_end) {
+            (void)kernel().free_block(block_uid);
+            reason = "export-table-end-misaligned";
+            return 0u;
+        }
+
+        for (const auto &import : imports)
+            (void)rt.register_import_stub(import.stub_address, import.library, import.nid);
+
+        const std::uint32_t uid = static_cast<std::uint32_t>(kernel().allocate_uid());
+        LoadedPrxModule state{};
+        state.uid = uid;
+        state.memory_block = block_uid;
+        state.load_base = load_base;
+        state.start_function = module_start;
+        state.stop_function = module_stop;
+        state.gp = module->gp;
+        state.name = module->name.empty() ? module_name : module->name;
+        loaded_prx_modules[uid] = state;
+        std::cerr << "[npdrm-module] loaded " << state.name
+                  << " uid=0x" << std::hex << uid
+                  << " base=0x" << load_base
+                  << " entry=0x" << elf.runtime_entry(load_base)
+                  << " module_start=0x" << module_start
+                  << " imports=" << std::dec << imports.size()
+                  << " rel2-invalid=" << relocations.invalid
+                  << " rel2-unsupported=" << relocations.unsupported << "\n";
+        reason = "ok";
+        return uid;
+    } catch (const std::exception &error) {
+        if (block_uid != 0) (void)kernel().free_block(block_uid);
+        reason = std::string("elf-loader-exception:") + error.what();
+        return 0u;
+    }
 }
 
 void register_process(HleRegistrar &hle) {
