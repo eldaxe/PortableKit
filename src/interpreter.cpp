@@ -946,7 +946,7 @@ InterpreterExit interpret_allegrex(Runtime &rt, AllegrexContext &ctx,
     };
     const auto dump_instruction_trace = [&](std::uint32_t fault_pc, const char *reason) {
         std::cerr << "[interpreter-fault-trace] pc=" << hex32(fault_pc)
-                  << " reason=" << reason << "\\n";
+                  << " reason=" << reason << "\n";
         const std::size_t first = (trace_next + instruction_trace.size() - trace_count) %
                                   instruction_trace.size();
         for (std::size_t item = 0u; item < trace_count; ++item) {
@@ -957,7 +957,7 @@ InterpreterExit interpret_allegrex(Runtime &rt, AllegrexContext &ctx,
                       << hex32(entry.pc) << " word=" << hex32(entry.word);
             for (std::size_t reg = 0u; reg < kTraceRegisterNames.size(); ++reg)
                 std::cerr << " " << kTraceRegisterNames[reg] << "=" << hex32(entry.gpr[reg]);
-            std::cerr << "\\n";
+            std::cerr << "\n";
         }
     };
     const auto execute_simple_traced = [&](const DecodedInstruction &instruction,
