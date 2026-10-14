@@ -828,13 +828,84 @@ void register_process(HleRegistrar &hle) {
     };
     hle.add("ModuleMgrForUser", "sceKernelLoadModule", load_module_by_path);
     hle.add("ModuleMgrForUser", "sceKernelLoadModuleNpDrm", load_module_by_path);
-    for (const char *name : {"sceKernelStartModule", "sceKernelStopModule", "sceKernelUnloadModule"}) {
-        hle.add("ModuleMgrForUser", name, [name](Runtime &, AllegrexContext &ctx) {
-            log_once(std::string("module-op:") + name, std::string("[module] ") + name);
-            // sceKernelStartModule returns the module id it was given.
-            kernel().finish(ctx, arg(ctx, 0));
-        });
-    }
+    hle.add("ModuleMgrForUser", "sceKernelStartModule", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t uid = arg(ctx, 0);
+        auto found = loaded_prx_modules.find(uid);
+        if (found == loaded_prx_modules.end()) {
+            // Stock Sony modules whose exports are supplied by HLE retain the
+            // existing synthetic-module behavior.
+            kernel().finish(ctx, uid);
+            return;
+        }
+        LoadedPrxModule &module = found->second;
+        if (module.started) {
+            kernel().finish(ctx, 0u);
+            return;
+        }
+        if (module.start_function == 0u) {
+            module.started = true;
+            kernel().finish(ctx, 0u);
+            return;
+        }
+        const std::uint32_t status_address = arg(ctx, 3);
+        const portablekit::GuestCallArguments arguments{
+            arg(ctx, 1), arg(ctx, 2), 0u, 0u, 0u, 0u, 0u, 0u
+        };
+        const std::uint32_t entry = module.start_function;
+        kernel().call_guest(ctx, entry, arguments,
+            [uid, status_address, &memory = rt.memory()](AllegrexContext &return_ctx, std::uint32_t result) {
+                auto state = loaded_prx_modules.find(uid);
+                if (state != loaded_prx_modules.end()) state->second.started = (result == 0u);
+                if (status_address != 0u && memory.contains(status_address, 4u))
+                    memory.store32(status_address, result);
+                kernel().finish(return_ctx, result);
+            }, 2u);
+    });
+    hle.add("ModuleMgrForUser", "sceKernelStopModule", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t uid = arg(ctx, 0);
+        auto found = loaded_prx_modules.find(uid);
+        if (found == loaded_prx_modules.end()) {
+            kernel().finish(ctx, uid);
+            return;
+        }
+        LoadedPrxModule &module = found->second;
+        if (!module.started || module.stop_function == 0u) {
+            module.started = false;
+            kernel().finish(ctx, 0u);
+            return;
+        }
+        const std::uint32_t status_address = arg(ctx, 3);
+        const portablekit::GuestCallArguments arguments{
+            arg(ctx, 1), arg(ctx, 2), 0u, 0u, 0u, 0u, 0u, 0u
+        };
+        kernel().call_guest(ctx, module.stop_function, arguments,
+            [uid, status_address, &memory = rt.memory()](AllegrexContext &return_ctx, std::uint32_t result) {
+                auto state = loaded_prx_modules.find(uid);
+                if (state != loaded_prx_modules.end()) state->second.started = false;
+                if (status_address != 0u && memory.contains(status_address, 4u))
+                    memory.store32(status_address, result);
+                kernel().finish(return_ctx, result);
+            }, 2u);
+    });
+    hle.add("ModuleMgrForUser", "sceKernelUnloadModule", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t uid = arg(ctx, 0);
+        auto found = loaded_prx_modules.find(uid);
+        if (found == loaded_prx_modules.end()) {
+            kernel().finish(ctx, uid);
+            return;
+        }
+        const LoadedPrxModule module = found->second;
+        const auto *block = kernel().find_block(module.memory_block);
+        if (block != nullptr) {
+            const std::uint32_t begin = block->address;
+            const std::uint64_t end = static_cast<std::uint64_t>(begin) + block->size;
+            if (end <= 0x100000000ull)
+                rt.unregister_functions(begin, static_cast<std::uint32_t>(end));
+        }
+        (void)kernel().free_block(module.memory_block);
+        loaded_prx_modules.erase(found);
+        kernel().finish(ctx, 0u);
+    });
     hle.add("ModuleMgrForUser", "sceKernelStopUnloadSelfModuleWithStatus", [](Runtime &, AllegrexContext &ctx) {
         kernel().exit_current_thread(ctx, static_cast<std::int32_t>(arg(ctx, 1)), true);
     });
