@@ -75,6 +75,10 @@ public:
     // Registers a guest function exported by a loaded ELF/PRX. Imports matching
     // this library/NID are redirected to guest code instead of being treated as HLE.
     bool register_guest_export(std::string library, std::uint32_t nid, std::uint32_t address);
+    // Removes exports whose function addresses belong to a module being unloaded.
+    // Duplicate library/NID exports are kept in load order so unloading the newest
+    // module restores the previous still-loaded implementation.
+    void unregister_guest_exports(std::uint32_t start, std::uint32_t end);
     [[nodiscard]] bool resolve_guest_export(std::string_view library, std::uint32_t nid,
                                             std::uint32_t &address) const;
     [[nodiscard]] bool has_function(std::uint32_t address) const;
@@ -208,7 +212,7 @@ private:
     std::unordered_map<std::string, HleLibrary,
                        TransparentStringHash, std::equal_to<>> hle_;
     std::unordered_map<std::uint32_t, NativeFastPath> native_fast_paths_;
-    std::unordered_map<std::string, std::uint32_t> guest_exports_;
+    std::unordered_map<std::string, std::vector<std::uint32_t>> guest_exports_;
     std::vector<const HleFunction *> import_bindings_;
     std::filesystem::path game_root_;
     bool stopped_{};

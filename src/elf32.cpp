@@ -9,8 +9,8 @@
 #include <iostream>
 #include <limits>
 
-#ifndef PSPPRECOMP_TRACE_REL2
-#define PSPPRECOMP_TRACE_REL2 0
+#ifndef PSPRECOMP_TRACE_REL2
+#define PSPRECOMP_TRACE_REL2 0
 #endif
 
 namespace psprecomp {
@@ -456,9 +456,7 @@ RelocationStats Elf32Image::apply_relocations(GuestMemory &memory, std::uint32_t
             // Per-relocation logging can produce multi-megabyte logs and bury
             // the actual fault. Enable it explicitly for a focused loader
             // investigation with -DPSPRECOMP_TRACE_REL2=1.
-#ifndef PSPRECOMP_TRACE_REL2
-#define PSPRECOMP_TRACE_REL2 0
-#endif
+
             constexpr bool trace_rel2 = PSPRECOMP_TRACE_REL2 != 0;
 
             if ((flag & 0x38u) == 0u) {
