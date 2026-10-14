@@ -447,6 +447,12 @@ RelocationStats Elf32Image::apply_relocations(GuestMemory &memory, std::uint32_t
             const std::uint32_t patch_address = static_cast<std::uint32_t>(patch64);
             ++stats.total;
 
+            // Opt-in REL2 tracing for diagnosing a single PRX without changing
+            // the loader's behavior or flooding normal logs.
+            const char *trace_env = std::getenv("PORTABLEKIT_TRACE_REL2");
+            const bool trace_rel2 = trace_env != nullptr && trace_env[0] != '\\0' &&
+                                    trace_env[0] != '0';
+
             if ((flag & 0x38u) == 0u) {
                 lo16 = 0;
             } else if ((flag & 0x38u) == 8u) {
@@ -459,6 +465,16 @@ RelocationStats Elf32Image::apply_relocations(GuestMemory &memory, std::uint32_t
 
             const std::uint32_t original = memory.load32(patch_address);
             std::uint32_t op = original;
+            if (trace_rel2) {
+                std::cerr << "[rel2] seg=" << address_segment
+                          << " patch-seg=" << off_segment
+                          << " address=0x" << std::hex << patch_address
+                          << " target=0x" << relocate_to
+                          << " type=" << std::dec << type
+                          << " flag=0x" << std::hex << flag
+                          << " lo16=0x" << static_cast<std::uint16_t>(lo16)
+                          << " before=0x" << original << '\\n';
+            }
             switch (type) {
             case 0u:
                 break;
@@ -490,6 +506,11 @@ RelocationStats Elf32Image::apply_relocations(GuestMemory &memory, std::uint32_t
                 continue;
             }
             if (op != original) memory.store32(patch_address, op);
+            if (trace_rel2) {
+                std::cerr << "[rel2] address=0x" << std::hex << patch_address
+                          << " after=0x" << op
+                          << (op == original ? " unchanged" : " relocated") << '\\n';
+            }
             last_type = static_cast<std::int32_t>(type);
         }
     }
