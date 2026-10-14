@@ -1260,7 +1260,8 @@ void Runtime::unregister_functions(std::uint32_t start, std::uint32_t end) {
             ++it;
             continue;
         }
-        const std::uint32_t c = memory_.canonical(it->first);
+        const std::uint32_t address = it->first;
+        const std::uint32_t c = memory_.canonical(address);
         if (c >= direct_base_) {
             const std::size_t index = static_cast<std::size_t>(c - direct_base_) / 4u;
             if (index < direct_functions_.size()) {
@@ -1268,7 +1269,16 @@ void Runtime::unregister_functions(std::uint32_t start, std::uint32_t end) {
                 direct_chainable_[index] = nullptr;
             }
         }
+        // Import-stub metadata has the same lifetime as the function entry.
+        // Leaving it behind allows repeated PRX load/unload cycles to retain
+        // stale library/NID bindings for guest addresses that are no longer live.
+        import_stubs().erase(address);
         it = functions_.erase(it);
+    }
+    for (auto it = native_fast_paths_.begin(); it != native_fast_paths_.end();) {
+        const std::uint32_t address = it->first;
+        if (address >= start && address < end) it = native_fast_paths_.erase(it);
+        else ++it;
     }
 }
 
