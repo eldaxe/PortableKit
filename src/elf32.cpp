@@ -432,6 +432,7 @@ RelocationStats Elf32Image::apply_relocations(GuestMemory &memory, std::uint32_t
                 continue;
             }
             const std::uint32_t patch_address = static_cast<std::uint32_t>(patch64);
+            ++stats.total;
 
             if ((flag & 0x38u) == 0u) {
                 lo16 = 0;
