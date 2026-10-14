@@ -11,6 +11,7 @@
 
 #include "psprecomp/common.hpp"
 #include "psprecomp/elf32.hpp"
+#include "psprecomp/deflate.hpp"
 
 #include <algorithm>
 #include <array>
@@ -480,6 +481,140 @@ struct LoadedPrxModule {
 };
 
 std::map<std::uint32_t, LoadedPrxModule> loaded_prx_modules;
+
+
+bool prepare_npdrm_elf_payload(Runtime &rt, const std::vector<std::uint8_t> &payload,
+                               std::uint16_t comp_attribute, std::uint32_t elf_size,
+                               std::vector<std::uint8_t> &elf_bytes, std::string &reason) {
+    if (comp_attribute == 0u) {
+        if (payload.size() < 4u || payload[0] != 0x7Fu || payload[1] != 'E' ||
+            payload[2] != 'L' || payload[3] != 'F') {
+            reason = "uncompressed-payload-is-not-elf";
+            return false;
+        }
+        elf_bytes = payload;
+        reason = "ok";
+        return true;
+    }
+    if (elf_size == 0u || elf_size > 64u * 1024u * 1024u) {
+        reason = "declared-elf-size-out-of-range";
+        return false;
+    }
+    if (payload.size() >= 4u &&
+        (std::memcmp(payload.data(), "KL4E", 4u) == 0 ||
+         std::memcmp(payload.data(), "KL3E", 4u) == 0)) {
+        reason = "kl4e-kl3e-compression-not-yet-implemented";
+        return false;
+    }
+    if ((comp_attribute & 0x0F00u) != 0u) {
+        reason = "unsupported-prx-compression-scheme";
+        return false;
+    }
+    if (payload.size() < 18u || payload[0] != 0x1Fu || payload[1] != 0x8Bu ||
+        payload[2] != 8u) {
+        reason = "gzip-header-invalid-or-missing";
+        return false;
+    }
+    const std::uint8_t flags = payload[3];
+    if ((flags & 0xE0u) != 0u) {
+        reason = "gzip-reserved-flags-set";
+        return false;
+    }
+    std::size_t data_offset = 10u;
+    const std::size_t trailer_offset = payload.size() - 8u;
+    auto skip_zero_terminated = [&]() {
+        while (data_offset < trailer_offset && payload[data_offset] != 0u) ++data_offset;
+        if (data_offset >= trailer_offset) return false;
+        ++data_offset;
+        return true;
+    };
+    if ((flags & 0x04u) != 0u) {
+        if (data_offset + 2u > trailer_offset) {
+            reason = "gzip-extra-length-truncated";
+            return false;
+        }
+        const std::size_t extra_size = static_cast<std::size_t>(payload[data_offset]) |
+            (static_cast<std::size_t>(payload[data_offset + 1u]) << 8u);
+        data_offset += 2u;
+        if (extra_size > trailer_offset - data_offset) {
+            reason = "gzip-extra-field-truncated";
+            return false;
+        }
+        data_offset += extra_size;
+    }
+    if ((flags & 0x08u) != 0u && !skip_zero_terminated()) {
+        reason = "gzip-filename-truncated";
+        return false;
+    }
+    if ((flags & 0x10u) != 0u && !skip_zero_terminated()) {
+        reason = "gzip-comment-truncated";
+        return false;
+    }
+    if ((flags & 0x02u) != 0u) {
+        if (data_offset + 2u > trailer_offset) {
+            reason = "gzip-header-crc-truncated";
+            return false;
+        }
+        data_offset += 2u;
+    }
+    if (data_offset >= trailer_offset) {
+        reason = "gzip-deflate-stream-empty";
+        return false;
+    }
+    const std::size_t compressed_size = trailer_offset - data_offset;
+    if (compressed_size > 64u * 1024u * 1024u) {
+        reason = "gzip-input-too-large";
+        return false;
+    }
+
+    auto &memory = rt.memory();
+    const std::size_t input_alloc_size = compressed_size + 16u;
+    const std::int32_t input_uid = kernel().allocate_block("npdrm-gzip-in", 0u,
+        static_cast<std::uint32_t>(input_alloc_size), 0u);
+    if (input_uid < 0) {
+        reason = "gzip-input-allocation-failed";
+        return false;
+    }
+    const std::int32_t output_uid = kernel().allocate_block("npdrm-gzip-out", 0u, elf_size, 0u);
+    if (output_uid < 0) {
+        (void)kernel().free_block(input_uid);
+        reason = "gzip-output-allocation-failed";
+        return false;
+    }
+    const auto *input_block = kernel().find_block(input_uid);
+    const auto *output_block = kernel().find_block(output_uid);
+    if (input_block == nullptr || output_block == nullptr) {
+        (void)kernel().free_block(output_uid);
+        (void)kernel().free_block(input_uid);
+        reason = "gzip-temporary-memory-block-missing";
+        return false;
+    }
+
+    memory.copy_in(input_block->address,
+        std::span<const std::uint8_t>(payload.data() + data_offset, compressed_size));
+    memory.zero(input_block->address + static_cast<std::uint32_t>(compressed_size), 16u);
+    const psprecomp::RawDeflateResult inflated = psprecomp::inflate_raw_deflate(
+        memory, output_block->address, elf_size, input_block->address);
+    bool valid = inflated.status == psprecomp::RawDeflateStatus::Ok &&
+        inflated.output_size != 0u && inflated.output_size <= elf_size &&
+        inflated.input_consumed <= compressed_size;
+    if (valid) {
+        elf_bytes.resize(inflated.output_size);
+        for (std::uint32_t i = 0; i < inflated.output_size; ++i)
+            elf_bytes[i] = memory.load8(output_block->address + i);
+        valid = elf_bytes.size() >= 4u && elf_bytes[0] == 0x7Fu &&
+            elf_bytes[1] == 'E' && elf_bytes[2] == 'L' && elf_bytes[3] == 'F';
+    }
+    (void)kernel().free_block(output_uid);
+    (void)kernel().free_block(input_uid);
+    if (!valid) {
+        elf_bytes.clear();
+        reason = "gzip-inflate-failed-or-output-not-elf";
+        return false;
+    }
+    reason = "ok";
+    return true;
+}
 
 std::uint32_t load_decrypted_prx(Runtime &rt, std::span<const std::uint8_t> image,
                                  const std::string &source, std::string &reason) {
