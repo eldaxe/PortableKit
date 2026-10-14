@@ -449,9 +449,13 @@ RelocationStats Elf32Image::apply_relocations(GuestMemory &memory, std::uint32_t
             const std::uint32_t patch_address = static_cast<std::uint32_t>(patch64);
             ++stats.total;
 
-            // Always enable REL2 tracing for Android builds where environment
-            // variables may not be practical to configure during reproduction.
-            constexpr bool trace_rel2 = true;
+            // Per-relocation logging can produce multi-megabyte logs and bury
+            // the actual fault. Enable it explicitly for a focused loader
+            // investigation with -DPSPRECOMP_TRACE_REL2=1.
+#ifndef PSPRECOMP_TRACE_REL2
+#define PSPRECOMP_TRACE_REL2 0
+#endif
+            constexpr bool trace_rel2 = PSPRECOMP_TRACE_REL2 != 0;
 
             if ((flag & 0x38u) == 0u) {
                 lo16 = 0;
