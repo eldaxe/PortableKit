@@ -224,11 +224,9 @@ RelocationStats Elf32Image::apply_relocations(GuestMemory &memory, std::uint32_t
     if (!is_psp_prx()) return stats;
 
     const auto segment_addresses = segment_runtime_addresses(load_base);
-    for (const auto &section : sections_) {
-        if (section.type != kSectionTypePspRel) continue;
-        if ((section.size % sizeof(Rel32)) != 0u) throw Error("Malformed PSP relocation section " + section.name);
-        const std::size_t count = section.size / sizeof(Rel32);
-        const auto raw = checked_span(section.offset, section.size);
+    auto apply_rel_table = [&](std::span<const std::uint8_t> raw) {
+        if ((raw.size() % sizeof(Rel32)) != 0u) throw Error("Malformed PSP relocation table");
+        const std::size_t count = raw.size() / sizeof(Rel32);
         std::vector<Rel32> rels(count);
         std::vector<std::uint32_t> original_ops(count);
         std::vector<bool> valid(count, true);
@@ -306,6 +304,23 @@ RelocationStats Elf32Image::apply_relocations(GuestMemory &memory, std::uint32_t
                 continue;
             }
             memory.store32(patch_address, op);
+        }
+
+    };
+
+    // PT_PSPREL1 (0x700000A0) stores Rel32 records in a program header.
+    // Stripped PRX files may retain only this header, so prefer it when present
+    // and fall back to SHT_PSPREL to avoid applying the same table twice.
+    bool has_rel1_segment = false;
+    for (const auto &segment : segments_) {
+        if (segment.type != 0x700000A0u) continue;
+        has_rel1_segment = true;
+        apply_rel_table(checked_span(segment.offset, segment.file_size));
+    }
+    if (!has_rel1_segment) {
+        for (const auto &section : sections_) {
+            if (section.type != kSectionTypePspRel) continue;
+            apply_rel_table(checked_span(section.offset, section.size));
         }
     }
     // PSP PT_PSPREL2 uses a compact command stream instead of Elf32_Rel
