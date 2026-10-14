@@ -898,8 +898,17 @@ void register_process(HleRegistrar &hle) {
                         (static_cast<std::uint32_t>(inner[0x2Du]) << 8u) |
                         (static_cast<std::uint32_t>(inner[0x2Eu]) << 16u) |
                         (static_cast<std::uint32_t>(inner[0x2Fu]) << 24u);
+                    const std::uint16_t comp_attribute = static_cast<std::uint16_t>(inner[6]) |
+                        static_cast<std::uint16_t>(static_cast<std::uint16_t>(inner[7]) << 8u);
+                    const std::uint32_t elf_size =
+                        static_cast<std::uint32_t>(inner[0x28u]) |
+                        (static_cast<std::uint32_t>(inner[0x29u]) << 8u) |
+                        (static_cast<std::uint32_t>(inner[0x2Au]) << 16u) |
+                        (static_cast<std::uint32_t>(inner[0x2Bu]) << 24u);
                     std::cerr << " inner=~PSP tag=0x" << std::hex << tag
                               << " decrypt_mode=0x" << static_cast<unsigned>(inner[0x7Cu])
+                              << " comp_attribute=0x" << comp_attribute
+                              << " elf_size=0x" << elf_size
                               << " psp_size=0x" << psp_size << std::dec;
                     if (key_ok) {
                         std::vector<std::uint8_t> decrypted_payload;
@@ -929,16 +938,24 @@ void register_process(HleRegistrar &hle) {
                                             ? std::string(reinterpret_cast<const char *>(decrypted_payload.data()), 4u)
                                             : std::string("<short>");
                                         std::cerr << " payload_magic=" << payload_magic;
-                                        std::string load_reason;
-                                        const std::uint32_t module_uid = load_decrypted_prx(
-                                            rt, decrypted_payload, path, load_reason);
-                                        if (module_uid != 0u) {
-                                            std::cerr << " module_load=success module_uid=0x"
-                                                      << std::hex << module_uid << std::dec << "\n";
-                                            kernel().finish(ctx, module_uid);
-                                            return;
+                                        std::vector<std::uint8_t> elf_bytes;
+                                        std::string prepare_reason;
+                                        if (!prepare_npdrm_elf_payload(rt, decrypted_payload,
+                                                comp_attribute, elf_size, elf_bytes, prepare_reason)) {
+                                            std::cerr << " payload_prepare=failed payload_prepare_reason="
+                                                      << prepare_reason;
+                                        } else {
+                                            std::string load_reason;
+                                            const std::uint32_t module_uid = load_decrypted_prx(
+                                                rt, elf_bytes, path, load_reason);
+                                            if (module_uid != 0u) {
+                                                std::cerr << " module_load=success module_uid=0x"
+                                                          << std::hex << module_uid << std::dec << "\n";
+                                                kernel().finish(ctx, module_uid);
+                                                return;
+                                            }
+                                            std::cerr << " module_load=failed module_reason=" << load_reason;
                                         }
-                                        std::cerr << " module_load=failed module_reason=" << load_reason;
                                     }
                                 } else {
                                     std::cerr << " payload_decrypt=failed payload_reason=prx-read-failed";
