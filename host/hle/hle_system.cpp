@@ -323,6 +323,15 @@ void register_platform(HleRegistrar &hle) {
         const std::uint32_t result = setup_edata_file(fd);
         kernel().finish(ctx, result);
     });
+    hle.add("scePspNpDrm_user", "sceNpDrmEdataGetDataSize", [](Runtime &, AllegrexContext &ctx) {
+        const std::uint32_t fd = arg(ctx, 0);
+        const std::uint32_t setup_result = setup_edata_file(fd);
+        if (setup_result != 0u) {
+            kernel().finish(ctx, setup_result);
+            return;
+        }
+        kernel().finish(ctx, edata_file_data_size(fd));
+    });
     hle.add("sceImpose", "sceImposeSetLanguageMode", [](Runtime &, AllegrexContext &ctx) {
         if (trace_system_params())
             std::cout << "[sysparam] sceImposeSetLanguageMode language=" << arg(ctx, 0) << " button=" << arg(ctx, 1)
