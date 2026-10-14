@@ -111,6 +111,137 @@ bool npdrm_derive_module_key(const std::uint8_t *edat, NpDrmBlock &out) {
     return true;
 }
 
+using NpDrmSha1 = std::array<std::uint8_t, 20>;
+
+NpDrmSha1 npdrm_sha1(std::span<const std::uint8_t> input) {
+    std::vector<std::uint8_t> bytes(input.begin(), input.end());
+    const std::uint64_t bit_length = static_cast<std::uint64_t>(bytes.size()) * 8u;
+    bytes.push_back(0x80u);
+    while ((bytes.size() & 63u) != 56u) bytes.push_back(0u);
+    for (int shift = 56; shift >= 0; shift -= 8)
+        bytes.push_back(static_cast<std::uint8_t>(bit_length >> shift));
+    std::uint32_t h0 = 0x67452301u, h1 = 0xEFCDAB89u, h2 = 0x98BADCFEu;
+    std::uint32_t h3 = 0x10325476u, h4 = 0xC3D2E1F0u;
+    for (std::size_t offset = 0; offset < bytes.size(); offset += 64u) {
+        std::array<std::uint32_t, 80> w{};
+        for (std::size_t i = 0; i < 16u; ++i) {
+            const std::size_t p = offset + i * 4u;
+            w[i] = (static_cast<std::uint32_t>(bytes[p]) << 24u) |
+                   (static_cast<std::uint32_t>(bytes[p + 1u]) << 16u) |
+                   (static_cast<std::uint32_t>(bytes[p + 2u]) << 8u) | bytes[p + 3u];
+        }
+        for (std::size_t i = 16u; i < 80u; ++i) {
+            const std::uint32_t v = w[i - 3u] ^ w[i - 8u] ^ w[i - 14u] ^ w[i - 16u];
+            w[i] = (v << 1u) | (v >> 31u);
+        }
+        std::uint32_t a = h0, b = h1, d = h3, e = h4, cc = h2;
+        for (std::size_t i = 0; i < 80u; ++i) {
+            std::uint32_t f{}, k{};
+            if (i < 20u) { f = (b & cc) | (~b & d); k = 0x5A827999u; }
+            else if (i < 40u) { f = b ^ cc ^ d; k = 0x6ED9EBA1u; }
+            else if (i < 60u) { f = (b & cc) | (b & d) | (cc & d); k = 0x8F1BBCDCu; }
+            else { f = b ^ cc ^ d; k = 0xCA62C1D6u; }
+            const std::uint32_t rotated = (a << 5u) | (a >> 27u);
+            const std::uint32_t temp = rotated + f + e + k + w[i];
+            e = d; d = cc; cc = (b << 30u) | (b >> 2u); b = a; a = temp;
+        }
+        h0 += a; h1 += b; h2 += cc; h3 += d; h4 += e;
+    }
+    NpDrmSha1 out{};
+    const std::array<std::uint32_t, 5> words{h0, h1, h2, h3, h4};
+    for (std::size_t i = 0; i < words.size(); ++i)
+        for (std::size_t j = 0; j < 4u; ++j)
+            out[i * 4u + j] = static_cast<std::uint8_t>(words[i] >> (24u - j * 8u));
+    return out;
+}
+
+void npdrm_kirk7(std::span<std::uint8_t> data, const NpDrmBlock &key) {
+    const portablekit::savedata::Aes128 cipher(key);
+    NpDrmBlock previous{};
+    for (std::size_t offset = 0; offset < data.size(); offset += 16u) {
+        NpDrmBlock encrypted{};
+        std::copy_n(data.data() + offset, encrypted.size(), encrypted.begin());
+        NpDrmBlock plain = cipher.decrypt(encrypted);
+        for (std::size_t i = 0; i < plain.size(); ++i) data[offset + i] = plain[i] ^ previous[i];
+        previous = encrypted;
+    }
+}
+
+// Validates the decrypted PRX type-5 header used by NPDRM SPRX modules.
+// This does not decrypt the executable payload or load/execute the module.
+bool npdrm_validate_sprx_header(std::span<const std::uint8_t> prx, const NpDrmBlock &module_key) {
+    if (prx.size() < 0x150u || std::memcmp(prx.data(), "~PSP", 4u) != 0) return false;
+    const std::uint32_t tag = static_cast<std::uint32_t>(prx[0xD0u]) |
+        (static_cast<std::uint32_t>(prx[0xD1u]) << 8u) |
+        (static_cast<std::uint32_t>(prx[0xD2u]) << 16u) |
+        (static_cast<std::uint32_t>(prx[0xD3u]) << 24u);
+    if (tag != 0x407810F0u || prx[0x7Cu] != 23u) return false;
+    for (std::size_t i = 0xD5u; i < 0x12Cu; ++i)
+        if (prx[i] != 0u) return false;
+    const CryptoKeys *keys = crypto_keys();
+    const Key16 *kirk_key = keys != nullptr ? keys->kirk(0x6Au) : nullptr;
+    if (kirk_key == nullptr) return false;
+    constexpr NpDrmBlock tag_key{
+        0xAF,0xAD,0xCA,0xF1,0x95,0x59,0x91,0xEC,0x1B,0x27,0xD0,0x4E,0x8A,0xF3,0x3D,0xE7
+    };
+    constexpr NpDrmBlock sprx_xor{
+        0x84,0x7B,0xF5,0xFE,0xE8,0x4D,0xAD,0x7A,0xB5,0x06,0x28,0x0E,0x09,0xFA,0x81,0xE1
+    };
+    // expandSeed(tag_key, 0x6A, module_key): nine AES-CBC blocks, then xor2.
+    std::array<std::uint8_t, 0x90> expanded{};
+    for (std::size_t offset = 0; offset < expanded.size(); offset += 16u) {
+        std::copy(tag_key.begin(), tag_key.end(), expanded.begin() + static_cast<std::ptrdiff_t>(offset));
+        expanded[offset] = static_cast<std::uint8_t>(offset / 16u);
+    }
+    npdrm_kirk7(expanded, *kirk_key);
+    for (std::size_t i = 0; i < expanded.size(); ++i) expanded[i] ^= module_key[i % 16u];
+
+    std::array<std::uint8_t, 4> tag_bytes{};
+    std::copy_n(prx.data() + 0xD0u, 4u, tag_bytes.begin());
+    std::array<std::uint8_t, 0x58> empty{};
+    std::array<std::uint8_t, 0x10> id{};
+    std::array<std::uint8_t, 0x14> sha{};
+    std::array<std::uint8_t, 0x40> kirk_header{};
+    std::array<std::uint8_t, 0x10> metadata{};
+    std::array<std::uint8_t, 0x80> prx_header{};
+    std::copy_n(prx.data() + 0x140u, id.size(), id.begin());
+    std::copy_n(prx.data() + 0x12Cu, sha.size(), sha.begin());
+    std::copy_n(prx.data() + 0x80u, 0x30u, kirk_header.begin());
+    std::copy_n(prx.data() + 0xC0u, 0x10u, kirk_header.begin() + 0x30);
+    std::copy_n(prx.data() + 0xB0u, metadata.size(), metadata.begin());
+    std::copy_n(prx.data(), prx_header.size(), prx_header.begin());
+
+    std::array<std::uint8_t, 0x50> first{};
+    std::copy(kirk_header.begin(), kirk_header.end(), first.begin());
+    std::copy_n(sha.begin(), 0x10u, first.begin() + 0x40);
+    for (std::size_t i = 0; i < first.size(); ++i)
+        first[i] ^= sprx_xor[i % 16u] ^ module_key[i % 16u];
+    npdrm_kirk7(first, *kirk_key);
+    std::copy_n(first.begin(), kirk_header.size(), kirk_header.begin());
+    std::copy_n(first.begin() + 0x40, 0x10u, sha.begin());
+
+    std::array<std::uint8_t, 0x60> id_region{};
+    std::copy(id.begin(), id.end(), id_region.begin());
+    std::copy(sha.begin(), sha.end(), id_region.begin() + 0x10);
+    std::copy_n(kirk_header.begin(), 0x3Cu, id_region.begin() + 0x24);
+    for (std::size_t i = 0; i < id_region.size(); ++i) id_region[i] ^= sprx_xor[i % 16u];
+    std::copy_n(id_region.begin(), id.size(), id.begin());
+    std::copy_n(id_region.begin() + 0x10, sha.size(), sha.begin());
+    std::copy_n(id_region.begin() + 0x24, 0x3Cu, kirk_header.begin());
+
+    std::vector<std::uint8_t> hash_data;
+    hash_data.insert(hash_data.end(), tag_bytes.begin(), tag_bytes.end());
+    hash_data.insert(hash_data.end(), expanded.begin(), expanded.begin() + 0x10);
+    hash_data.insert(hash_data.end(), empty.begin(), empty.end());
+    hash_data.insert(hash_data.end(), id.begin(), id.end());
+    hash_data.insert(hash_data.end(), sha.begin(), sha.end());
+    hash_data.insert(hash_data.end(), kirk_header.begin(), kirk_header.end());
+    hash_data.insert(hash_data.end(), metadata.begin(), metadata.end());
+    hash_data.insert(hash_data.end(), prx_header.begin(), prx_header.end());
+    const NpDrmSha1 digest = npdrm_sha1(hash_data);
+    return std::equal(digest.begin(), digest.end(), sha.begin());
+}
+
 // The console settings a game asks for and tells the system, under
 // TRACE_KERNEL: which language and which confirm button it ends up using.
 bool trace_system_params() {
