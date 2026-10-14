@@ -300,7 +300,7 @@ bool npdrm_decrypt_type5_payload(std::span<const std::uint8_t> prx,
     const std::uint32_t data_offset = read_le32(work.data() + header_offset + 0x74u);
     const std::uint64_t aligned_size = (static_cast<std::uint64_t>(data_size) + 15u) & ~std::uint64_t(15u);
     const std::uint64_t needed = header_offset + 0x90u + data_offset + aligned_size;
-    if (data_size == 0u || (data_size % 16u) != 0u || needed > work.size() ||
+    if (data_size == 0u || needed > work.size() ||
         data_size > 64u * 1024u * 1024u) {
         reason = "kirk-output-range-invalid";
         return false;
@@ -336,13 +336,16 @@ bool npdrm_decrypt_type5_payload(std::span<const std::uint8_t> prx,
     }
 
     const std::size_t cipher_offset = header_offset + 0x90u + data_offset;
+    // KIRK encrypts the final partial block with zero padding. Decrypt the
+    // complete block-aligned ciphertext, then trim to the authenticated size.
     payload.assign(work.begin() + static_cast<std::ptrdiff_t>(cipher_offset),
-                   work.begin() + static_cast<std::ptrdiff_t>(cipher_offset + data_size));
+                   work.begin() + static_cast<std::ptrdiff_t>(cipher_offset + aligned_size));
     if (!npdrm_cbc_decrypt(payload, aes_key)) {
         payload.clear();
         reason = "kirk-payload-decrypt-failed";
         return false;
     }
+    payload.resize(data_size);
     reason = "ok";
     return true;
 }
