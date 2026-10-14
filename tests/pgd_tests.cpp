@@ -46,6 +46,10 @@ int main() {
     const Block desc_key = dummy(20), data_key = dummy(21), vkey = dummy(22);
 
     const auto file = PgdFile::build(plain, desc_key, data_key, vkey, keys);
+    std::string derive_error;
+    const auto recovered_vkey = derive_vkey(std::span(file.data(), 0x90u), keys, derive_error);
+    check(recovered_vkey.has_value() && *recovered_vkey == vkey,
+          "the PGD version key is recovered from the header MAC");
     check(file.size() == 0x90u + 3u * 0x400u, "three 0x400-byte blocks after the 0x90-byte header");
     const auto raw_reader = [&file](std::uint64_t offset, std::span<std::uint8_t> out) -> std::size_t {
         if (offset >= file.size()) return 0u;
