@@ -2,6 +2,7 @@
 // InterruptManager, scePower, sceRtc, sceImpose, sceOpenPSID and the parameter
 // part of sceUtility. sceWlanDrv is with the ad hoc calls in hle_adhoc.cpp.
 #include "../profile.hpp"
+#include "../crypto_keys.hpp"
 #include "hle_common.hpp"
 
 #include "kernel/rtc_time.hpp"
@@ -17,7 +18,9 @@
 #include <ctime>
 #include <iostream>
 #include <set>
+#include <span>
 #include <string>
+#include <vector>
 
 namespace portablekit {
 void register_rtc_calendar(HleRegistrar &hle);
@@ -234,7 +237,6 @@ bool npdrm_validate_sprx_header(std::span<const std::uint8_t> prx, const NpDrmBl
     hash_data.insert(hash_data.end(), expanded.begin(), expanded.begin() + 0x10);
     hash_data.insert(hash_data.end(), empty.begin(), empty.end());
     hash_data.insert(hash_data.end(), id.begin(), id.end());
-    hash_data.insert(hash_data.end(), sha.begin(), sha.end());
     hash_data.insert(hash_data.end(), kirk_header.begin(), kirk_header.end());
     hash_data.insert(hash_data.end(), metadata.begin(), metadata.end());
     hash_data.insert(hash_data.end(), prx_header.begin(), prx_header.end());
@@ -409,6 +411,9 @@ void register_process(HleRegistrar &hle) {
                     std::cerr << " inner=~PSP tag=0x" << std::hex << tag
                               << " decrypt_mode=0x" << static_cast<unsigned>(inner[0x7Cu])
                               << " psp_size=0x" << psp_size << std::dec;
+                    if (key_ok)
+                        std::cerr << " type5_header_sha1="
+                                  << (npdrm_validate_sprx_header(inner, module_key) ? "valid" : "invalid_or_unsupported");
                 } else {
                     std::cerr << " inner_prx_header=unavailable_or_invalid";
                 }
