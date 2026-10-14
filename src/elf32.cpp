@@ -387,15 +387,8 @@ RelocationStats Elf32Image::apply_relocations(GuestMemory &memory, std::uint32_t
             }
 
             const std::uint32_t address_segment = segment;
-            if (address_segment >= segments_.size() ||
-                segments_[address_segment].type != kPtLoad ||
-                off_segment < 0 || static_cast<std::size_t>(off_segment) >= segments_.size() ||
-                segments_[static_cast<std::size_t>(off_segment)].type != kPtLoad) {
-                ++stats.invalid;
-                last_type = -1;
-                continue;
-            }
-            const std::uint32_t relocate_to = segment_addresses[address_segment];
+            // Decode any inline offset bytes before validating segment indexes:
+            // even an invalid target segment must not desynchronize this stream.
             std::int64_t rel_offset = 0;
             const unsigned packed_shift = static_cast<unsigned>(type_bits) + seg_bits + flag_bits;
             const std::int32_t signed_command = (command & 0x8000u) != 0u
@@ -419,11 +412,16 @@ RelocationStats Elf32Image::apply_relocations(GuestMemory &memory, std::uint32_t
                 throw Error("Invalid PSP REL2 offset-size flag");
             }
 
-            if (rel_base < 0 || rel_base > 0x7FFFFFFFll) {
+            if (rel_base < 0 || rel_base > 0x7FFFFFFFll ||
+                address_segment >= segments_.size() ||
+                segments_[address_segment].type != kPtLoad ||
+                off_segment < 0 || static_cast<std::size_t>(off_segment) >= segments_.size() ||
+                segments_[static_cast<std::size_t>(off_segment)].type != kPtLoad) {
                 ++stats.invalid;
                 last_type = -1;
                 continue;
             }
+            const std::uint32_t relocate_to = segment_addresses[address_segment];
             const std::uint64_t patch64 = static_cast<std::uint64_t>(
                 segment_addresses[static_cast<std::size_t>(off_segment)]) +
                 static_cast<std::uint64_t>(rel_base);
