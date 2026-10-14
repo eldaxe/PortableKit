@@ -407,8 +407,11 @@ RelocationStats Elf32Image::apply_relocations(GuestMemory &memory, std::uint32_t
             } else if ((flag & 6u) == 2u) {
                 const std::int32_t high = signed_command >> packed_shift;
                 const std::uint16_t low = read_u16();
-                rel_offset = static_cast<std::int32_t>((static_cast<std::uint32_t>(high) << 16u) | low);
-                if ((low & 0x8000u) != 0u) rel_offset = static_cast<std::int32_t>(rel_offset) - 0x10000;
+                // The encoded high half is sign-extended before shifting; the
+                // low half is then concatenated verbatim (not sign-extended).
+                const std::uint32_t combined =
+                    (static_cast<std::uint32_t>(high) << 16u) | low;
+                rel_offset = static_cast<std::int32_t>(combined);
                 rel_base += rel_offset;
             } else if ((flag & 6u) == 4u) {
                 rel_base = read_u32();
