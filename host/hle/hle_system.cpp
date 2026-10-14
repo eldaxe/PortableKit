@@ -585,9 +585,33 @@ void register_process(HleRegistrar &hle) {
                     std::cerr << " inner=~PSP tag=0x" << std::hex << tag
                               << " decrypt_mode=0x" << static_cast<unsigned>(inner[0x7Cu])
                               << " psp_size=0x" << psp_size << std::dec;
-                    if (key_ok)
+                    if (key_ok) {
+                        std::vector<std::uint8_t> decrypted_payload;
+                        std::string decrypt_reason;
+                        const bool header_valid = npdrm_validate_sprx_header(inner, module_key);
                         std::cerr << " type5_header_sha1="
-                                  << (npdrm_validate_sprx_header(inner, module_key) ? "valid" : "invalid_or_unsupported");
+                                  << (header_valid ? "valid" : "invalid_or_unsupported");
+                        if (header_valid) {
+                            const std::int64_t prx_size = read_guest_file(path, payload_offset, nullptr, 0u);
+                            (void)prx_size;
+                            // Read the full wrapped PRX separately; the small header probe above
+                            // intentionally does not allocate according to untrusted file metadata.
+                            constexpr std::size_t kMaxPrxProbe = 64u * 1024u * 1024u;
+                            std::vector<std::uint8_t> full_prx(kMaxPrxProbe);
+                            const std::int64_t full_count = read_guest_file(path, payload_offset, full_prx.data(), full_prx.size());
+                            if (full_count >= 0x150) {
+                                full_prx.resize(static_cast<std::size_t>(full_count));
+                                const bool decrypted = npdrm_decrypt_type5_payload(
+                                    full_prx, module_key, decrypted_payload, decrypt_reason);
+                                std::cerr << " payload_decrypt=" << (decrypted ? "success" : "failed")
+                                          << " payload_reason=" << decrypt_reason;
+                                if (decrypted)
+                                    std::cerr << " payload_bytes=" << decrypted_payload.size();
+                            } else {
+                                std::cerr << " payload_decrypt=failed payload_reason=prx-read-failed";
+                            }
+                        }
+                    }
                 } else {
                     std::cerr << " inner_prx_header=unavailable_or_invalid";
                 }
