@@ -812,6 +812,16 @@ void register_process(HleRegistrar &hle) {
         kernel().finish(ctx, kMainModuleId);
     });
     hle.add("ModuleMgrForUser", "sceKernelGetModuleIdByAddress", [](Runtime &, AllegrexContext &ctx) {
+        const std::uint32_t address = arg(ctx, 0);
+        for (const auto &[uid, module] : loaded_prx_modules) {
+            const auto *block = kernel().find_block(module.memory_block);
+            if (block == nullptr) continue;
+            const std::uint64_t end = static_cast<std::uint64_t>(block->address) + block->size;
+            if (address >= block->address && static_cast<std::uint64_t>(address) < end) {
+                kernel().finish(ctx, uid);
+                return;
+            }
+        }
         kernel().finish(ctx, kMainModuleId);
     });
     // Games load Sony's stock modules (font, codecs) as encrypted PRX blobs from
