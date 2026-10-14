@@ -725,17 +725,19 @@ std::uint32_t load_decrypted_prx(Runtime &rt, std::span<const std::uint8_t> imag
             }
             const std::uint64_t symbol_count = static_cast<std::uint64_t>(function_count) + variable_count;
             const std::uint64_t symbol_bytes = symbol_count * 8u;
+            const std::uint64_t export_addresses64 =
+                static_cast<std::uint64_t>(resident) + symbol_count * 4u;
             if (symbol_count != 0u && (resident == 0u || symbol_bytes > 1024u * 1024u ||
+                export_addresses64 > std::numeric_limits<std::uint32_t>::max() ||
                 !memory.contains(resident, static_cast<std::size_t>(symbol_count * 4u)) ||
-                !memory.contains(resident + static_cast<std::uint32_t>(symbol_count * 4u),
+                !memory.contains(static_cast<std::uint32_t>(export_addresses64),
                                  static_cast<std::size_t>(symbol_count * 4u)))) {
                 (void)kernel().free_block(block_uid);
                 reason = "invalid-export-resident-table";
                 return 0u;
             }
             if (symbol_count != 0u) {
-                const std::uint32_t export_addresses =
-                    resident + static_cast<std::uint32_t>(symbol_count * 4u);
+                const std::uint32_t export_addresses = static_cast<std::uint32_t>(export_addresses64);
                 for (std::uint32_t i = 0; i < function_count; ++i) {
                     const std::uint32_t nid = memory.load32(resident + i * 4u);
                     const std::uint32_t address = memory.load32(export_addresses + i * 4u);
@@ -749,6 +751,18 @@ std::uint32_t load_decrypted_prx(Runtime &rt, std::span<const std::uint8_t> imag
         if (cursor != module->ent_end) {
             (void)kernel().free_block(block_uid);
             reason = "export-table-end-misaligned";
+            return 0u;
+        }
+        const std::uint64_t block_end =
+            static_cast<std::uint64_t>(block->address) + block->size;
+        if ((module_start != 0u &&
+             (module_start < block->address || module_start >= block_end ||
+              !memory.contains(module_start, 4u))) ||
+            (module_stop != 0u &&
+             (module_stop < block->address || module_stop >= block_end ||
+              !memory.contains(module_stop, 4u)))) {
+            (void)kernel().free_block(block_uid);
+            reason = "module-lifecycle-export-outside-loaded-image";
             return 0u;
         }
 
