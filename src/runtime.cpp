@@ -216,11 +216,21 @@ bool Runtime::run_interpreter_fallback(AllegrexContext &ctx) {
     try {
         return interpret_allegrex(*this, ctx) != InterpreterExit::Unreachable;
     } catch (const Error &e) {
-        // Name the guest code, as a fault in generated code is named.
+        // Name the guest code, as a fault in generated code is named, and
+        // include nearby guest instructions so a null dereference can be
+        // traced back to the exact load/store without a separate disassembler.
         std::ostringstream message;
         message << e.what() << " while interpreting from " << hex32(entry) << " guest_pc=" << hex32(ctx.pc)
                 << " (a0=" << hex32(ctx.gpr[4]) << ", a1=" << hex32(ctx.gpr[5]) << ", sp=" << hex32(ctx.gpr[29])
                 << ", ra=" << hex32(ctx.gpr[31]) << ")";
+        if (memory_.contains(ctx.pc, 4u)) {
+            message << "\n  guest_instructions:";
+            const std::uint32_t first = ctx.pc >= 20u ? ctx.pc - 20u : ctx.pc;
+            for (std::uint32_t address = first; address <= ctx.pc + 8u && memory_.contains(address, 4u); address += 4u) {
+                message << "\n   " << (address == ctx.pc ? "=>" : "  ") << hex32(address)
+                        << " word=" << hex32(memory_.load32(address));
+            }
+        }
         append_gpr_dump(message, ctx);
         throw Error(message.str());
     }
