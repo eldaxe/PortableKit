@@ -861,8 +861,15 @@ std::uint32_t setup_edata_file(std::uint32_t fd) {
     const std::size_t got = read_open_file(fd, 0u, magic.data(), magic.size());
     constexpr std::array<std::uint8_t, 8> kEdatMagic{0u, 'P', 'S', 'P', 'E', 'D', 'A', 'T'};
     if (got < magic.size() || magic != kEdatMagic) {
-        if (trace_io()) std::cerr << "[npdrm] sceNpDrmEdataSetupKey: " << file.path
-                                  << " is not an EDAT container; leaving it unfiltered\n";
+        if (trace_io() || file.path.find(".EDAT") != std::string::npos ||
+            file.path.find(".edat") != std::string::npos) {
+            std::string bytes;
+            for (const std::uint8_t byte : magic)
+                bytes += " " + psprecomp::hex32(byte).substr(6u);
+            std::cerr << "[npdrm] sceNpDrmEdataSetupKey: " << file.path
+                      << " is not an EDAT container (read=" << got << "/8, magic:" << bytes
+                      << "); leaving it unfiltered\n";
+        }
         return 0u;
     }
 
