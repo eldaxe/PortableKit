@@ -33,6 +33,11 @@ std::uint64_t guest_unix_us() { return boot_unix_us() + kernel().now_us(); }
 
 void success(Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, 0u); }
 
+// sceNpDrmSetLicenseeKey stores a 16-byte key for subsequent EDAT/NPDRM operations.
+// Keep the state private to the emulated process and never print the key itself.
+std::array<std::uint8_t, 16> npdrm_licensee_key{};
+bool npdrm_licensee_key_set = false;
+
 // The console settings a game asks for and tells the system, under
 // TRACE_KERNEL: which language and which confirm button it ends up using.
 bool trace_system_params() {
@@ -154,6 +159,22 @@ void register_process(HleRegistrar &hle) {
             kernel().finish(ctx, static_cast<std::uint32_t>(count));
             return;
         }
+        constexpr std::array<std::uint8_t, 8> edat_magic{0u, 'P', 'S', 'P', 'E', 'D', 'A', 'T'};
+        if (count >= 0x90 && std::equal(edat_magic.begin(), edat_magic.end(), header.begin())) {
+            const std::uint32_t payload_offset = static_cast<std::uint32_t>(header[0x0C]) |
+                                                 (static_cast<std::uint32_t>(header[0x0D]) << 8u);
+            std::cerr << "[npdrm-module] path=" << path << " outer=PSPEDAT key_mode="
+                      << static_cast<unsigned>(header[0x08]) << " payload_offset=0x" << std::hex << payload_offset
+                      << " flags=0x" << static_cast<unsigned>(header[0x0F]) << std::dec
+                      << " licensee_key_set=" << (npdrm_licensee_key_set ? "yes" : "no");
+            if (payload_offset + 4u <= static_cast<std::uint32_t>(count) &&
+                std::memcmp(header.data() + payload_offset, "~PSP", 4u) == 0) {
+                std::cerr << " inner=~PSP";
+            } else {
+                std::cerr << " inner_header_not_in_probe";
+            }
+            std::cerr << "\\n";
+        }
         load_stock_module(ctx, header.data(), static_cast<std::size_t>(count), " from " + path);
     };
     hle.add("ModuleMgrForUser", "sceKernelLoadModule", load_module_by_path);
@@ -268,8 +289,22 @@ void register_platform(HleRegistrar &hle) {
     hle.add("sceSuspendForUser", "sceKernelPowerUnlock", success);
     // A disc game's licensee key and a PSN title's data key: nothing here
     // decrypts with them yet. Chinatown Wars imports both.
-    hle.add("scePspNpDrm_user", "sceNpDrmSetLicenseeKey", [](Runtime &, AllegrexContext &ctx) {
-        log_once("npdrm-licensee", "[npdrm] sceNpDrmSetLicenseeKey (UNVERIFIED: no game traced yet)");
+    hle.add("scePspNpDrm_user", "sceNpDrmSetLicenseeKey", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t address = arg(ctx, 0);
+        if (address == 0u) {
+            kernel().finish(ctx, error::kIllegalArgument);
+            return;
+        }
+        for (std::uint32_t i = 0; i < npdrm_licensee_key.size(); ++i)
+            npdrm_licensee_key[i] = rt.memory().load8(address + i);
+        npdrm_licensee_key_set = true;
+        log_once("npdrm-licensee", "[npdrm] sceNpDrmSetLicenseeKey: stored 16-byte key (value redacted)");
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("scePspNpDrm_user", "sceNpDrmClearLicenseeKey", [](Runtime &, AllegrexContext &ctx) {
+        npdrm_licensee_key.fill(0u);
+        npdrm_licensee_key_set = false;
+        log_once("npdrm-licensee-clear", "[npdrm] sceNpDrmClearLicenseeKey");
         kernel().finish(ctx, 0u);
     });
     hle.add("scePspNpDrm_user", "sceNpDrmEdataSetupKey", [](Runtime &, AllegrexContext &ctx) {
