@@ -6,6 +6,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <fstream>
+#include <iostream>
 #include <limits>
 
 namespace psprecomp {
