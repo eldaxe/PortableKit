@@ -27,6 +27,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <vector>
@@ -123,7 +124,29 @@ MpegState *find_mpeg(std::uint32_t address) {
 
 void finish_traced(AllegrexContext &ctx, const char *name, std::uint32_t result, const std::string &details = {},
                    unsigned arguments = 4u) {
-    if (trace_mpeg()) {
+    // Keep useful movie diagnostics in ordinary Android logs without requiring
+    // TRACE_MPEG. The feeder and decoder run in tight loops, so cap each
+    // function at its first 12 calls.
+    static std::map<std::string, unsigned> diagnostic_counts;
+    static std::mutex diagnostic_mutex;
+    static const std::vector<std::string> diagnostic_functions = {
+        "sceMpegQueryStreamOffset", "sceMpegQueryStreamSize", "sceMpegRingbufferQueryMemSize",
+        "sceMpegRingbufferQueryPackNum", "sceMpegRingbufferConstruct", "sceMpegRingbufferPut",
+        "sceMpegCreate", "sceMpegGetAvcAu", "sceMpegGetAtracAu", "sceMpegAvcDecode",
+        "sceMpegAvcDecodeYCbCr", "sceMpegAvcCsc", "sceMpegAtracDecode", "sceJpegCsc"
+    };
+    bool diagnostic = false;
+    if (!trace_mpeg()) {
+        const std::lock_guard<std::mutex> lock(diagnostic_mutex);
+        for (const auto &candidate : diagnostic_functions) {
+            if (candidate == name) {
+                unsigned &count = diagnostic_counts[candidate];
+                diagnostic = count++ < 12u;
+                break;
+            }
+        }
+    }
+    if (trace_mpeg() || diagnostic) {
         std::ostringstream line;
         line << "[mpeg] " << name << "(";
         for (unsigned i = 0; i < arguments; ++i) line << (i != 0u ? ", " : "") << psprecomp::hex32(arg(ctx, i));
@@ -747,7 +770,12 @@ void register_movie_skip(HleRegistrar &hle) {
 bool mpeg_active() { return !module().instances.empty(); }
 
 void register_mpeg(HleRegistrar &hle) {
-    if (!movie::AvcDecoder::available() || !audio::AtracDecoder::available()) {
+    const bool avc_available = movie::AvcDecoder::available();
+    const bool atrac_available = audio::AtracDecoder::available();
+    std::cerr << "[mpeg] decoder availability: H264=" << (avc_available ? "yes" : "no")
+              << " ATRAC=" << (atrac_available ? "yes" : "no") << "\n";
+    if (!avc_available || !atrac_available) {
+        std::cerr << "[mpeg] movie playback is in skip mode because a decoder is unavailable\n";
         register_movie_skip(hle);
         return;
     }
