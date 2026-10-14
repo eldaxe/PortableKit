@@ -428,6 +428,32 @@ static void test_interpreter_budget_and_disable() {
             "PSPRECOMP_NO_INTERPRETER did not restore the strict dispatch stop");
 }
 
+static void test_guest_export_unload_restore() {
+    psprecomp::Runtime runtime;
+    constexpr std::uint32_t kMainExport = 0x08804000u;
+    constexpr std::uint32_t kModuleExport = 0x08804100u;
+    constexpr std::uint32_t kNid = 0x12345678u;
+    runtime.memory().store32(kMainExport, 0u);
+    runtime.memory().store32(kModuleExport, 0u);
+
+    require(runtime.register_guest_export("test_library", kNid, kMainExport),
+            "Could not register the main executable's guest export");
+    require(runtime.register_guest_export("test_library", kNid, kModuleExport),
+            "Could not register a PRX guest export with a duplicate library/NID");
+
+    std::uint32_t address = 0u;
+    require(runtime.resolve_guest_export("test_library", kNid, address) && address == kModuleExport,
+            "Newest loaded PRX export did not take precedence");
+
+    runtime.unregister_guest_exports(kModuleExport, kModuleExport + 0x100u);
+    require(runtime.resolve_guest_export("test_library", kNid, address) && address == kMainExport,
+            "Unloading a PRX did not restore the previous guest export");
+
+    runtime.unregister_guest_exports(kMainExport, kMainExport + 0x100u);
+    require(!runtime.resolve_guest_export("test_library", kNid, address),
+            "Unloaded guest export remained resolvable");
+}
+
 static void test_import_return_context_guard() {
     psprecomp::set_runtime_thread_identity(5, "UmdStreamThread");
     const auto worker_context = psprecomp::capture_runtime_execution_context();
@@ -1323,6 +1349,7 @@ static std::vector<std::uint8_t> make_relocation_test_prx() {
 int main() {
     try {
         test_import_return_context_guard();
+        test_guest_export_unload_restore();
         test_chained_call_context_guard();
         test_nested_direct_chain_context_guard();
         test_interpreter_delay_slots_and_branch_likely();
