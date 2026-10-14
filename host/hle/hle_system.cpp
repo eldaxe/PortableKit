@@ -102,12 +102,27 @@ void register_process(HleRegistrar &hle) {
     // The name logged is the one in the module's "~PSP" header.
     const auto load_stock_module = [](AllegrexContext &ctx, const std::uint8_t *header, std::size_t count,
                                       const std::string &where) {
-        std::string name = "unknown";
+        std::string name;
+        bool recognized = false;
         for (std::size_t i = 0; i + 0x2Au < count; ++i) {
             if (std::memcmp(header + i, "~PSP", 4u) != 0) continue;
             const char *text = reinterpret_cast<const char *>(header + i + 0x0Au);
             name.assign(text, strnlen(text, 28u));
+            recognized = true;
             break;
+        }
+        // An already-decrypted module may be a plain ELF rather than a ~PSP
+        // wrapper. Never return a synthetic UID for an empty or unrecognised
+        // file: that hides path/NPDRM failures from the caller and the log.
+        if (!recognized && count >= 4u && std::memcmp(header, "\x7f" "ELF", 4u) == 0) {
+            name = "ELF";
+            recognized = true;
+        }
+        if (!recognized) {
+            std::cerr << "[module] cannot process module" << where << ": no PSP PRX/ELF header"
+                      << " (bytes=" << count << ")\n";
+            kernel().finish(ctx, error::kIllegalArgument);
+            return;
         }
         const auto uid = static_cast<std::uint32_t>(kernel().allocate_uid());
         log_once("module:" + name, "[module] loaded stock module " + name + where + " (HLE)");
@@ -116,22 +131,33 @@ void register_process(HleRegistrar &hle) {
     hle.add("ModuleMgrForUser", "sceKernelLoadModuleByID", [load_stock_module](Runtime &, AllegrexContext &ctx) {
         std::array<std::uint8_t, 0x100> header{};
         const std::size_t count = read_open_file(arg(ctx, 0), 0u, header.data(), header.size());
-        load_stock_module(ctx, header.data(), count, "");
+        if (count == 0u) {
+            kernel().finish(ctx, 0x80010009u); // SCE_KERNEL_ERROR_BADF
+            return;
+        }
+        load_stock_module(ctx, header.data(), count, " from fd=" + std::to_string(arg(ctx, 0)));
     });
-    // The same by path. A path that does not open fails the way sceIoOpen
-    // would have.
-    hle.add("ModuleMgrForUser", "sceKernelLoadModule", [load_stock_module](Runtime &rt, AllegrexContext &ctx) {
+    // NPDRM and ordinary loads share the same file-opening and header-checking
+    // path. This is not a success-only stub: the requested file must exist and
+    // contain a PRX/ELF signature before stock-module HLE is acknowledged.
+    const auto load_module_by_path = [load_stock_module](Runtime &rt, AllegrexContext &ctx) {
         const std::string path = read_cstring(rt.memory(), arg(ctx, 0), 256u);
+        if (path.empty()) {
+            kernel().finish(ctx, error::kIllegalArgument);
+            return;
+        }
         std::array<std::uint8_t, 0x100> header{};
         const std::int64_t count = read_guest_file(path, 0u, header.data(), header.size());
         if (count < 0) {
-            std::cerr << "[module] cannot load " << path << ": " << psprecomp::hex32(static_cast<std::uint32_t>(count))
-                      << "\n";
+            std::cerr << "[module] cannot open " << path << ": "
+                      << psprecomp::hex32(static_cast<std::uint32_t>(count)) << "\n";
             kernel().finish(ctx, static_cast<std::uint32_t>(count));
             return;
         }
         load_stock_module(ctx, header.data(), static_cast<std::size_t>(count), " from " + path);
-    });
+    };
+    hle.add("ModuleMgrForUser", "sceKernelLoadModule", load_module_by_path);
+    hle.add("ModuleMgrForUser", "sceKernelLoadModuleNpDrm", load_module_by_path);
     for (const char *name : {"sceKernelStartModule", "sceKernelStopModule", "sceKernelUnloadModule"}) {
         hle.add("ModuleMgrForUser", name, [name](Runtime &, AllegrexContext &ctx) {
             log_once(std::string("module-op:") + name, std::string("[module] ") + name);
