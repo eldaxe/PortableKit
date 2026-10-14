@@ -1013,6 +1013,69 @@ void register_process(HleRegistrar &hle) {
                 return;
             }
         }
+        // A decrypted SPRX may be stored directly as a relocatable PSP ELF.
+        // Do not silently acknowledge it as a synthetic HLE stock module: load
+        // its actual image so sceKernelStartModule can execute its module_start.
+        if (count >= 4 && std::memcmp(header.data(), "\x7F" "ELF", 4u) == 0) {
+            constexpr std::size_t kMaxRawPrxSize = 64u * 1024u * 1024u;
+            constexpr std::size_t kReadChunkSize = 64u * 1024u;
+            std::vector<std::uint8_t> image;
+            image.reserve(kReadChunkSize);
+            std::array<std::uint8_t, kReadChunkSize> chunk{};
+            std::uint32_t offset = 0u;
+            bool read_failed = false;
+            bool reached_eof = false;
+            while (image.size() < kMaxRawPrxSize) {
+                const std::size_t requested = std::min(kReadChunkSize, kMaxRawPrxSize - image.size());
+                const std::int64_t bytes_read = read_guest_file(path, offset, chunk.data(), requested);
+                if (bytes_read < 0) {
+                    read_failed = true;
+                    break;
+                }
+                if (bytes_read == 0) {
+                    reached_eof = true;
+                    break;
+                }
+                const std::size_t got = static_cast<std::size_t>(bytes_read);
+                image.insert(image.end(), chunk.begin(), chunk.begin() + got);
+                offset += static_cast<std::uint32_t>(got);
+                if (got < requested) {
+                    reached_eof = true;
+                    break;
+                }
+            }
+            if (!read_failed && !reached_eof && image.size() == kMaxRawPrxSize) {
+                std::uint8_t probe{};
+                const std::int64_t extra = read_guest_file(path, offset, &probe, 1u);
+                if (extra > 0) {
+                    std::cerr << "[module] raw ELF too large to load from " << path
+                              << " (limit=" << kMaxRawPrxSize << " bytes)\n";
+                    kernel().finish(ctx, error::kIllegalArgument);
+                    return;
+                }
+                if (extra < 0) read_failed = true;
+            }
+            if (read_failed || image.size() < 4u ||
+                std::memcmp(image.data(), "\x7F" "ELF", 4u) != 0) {
+                std::cerr << "[module] failed to read raw ELF module from " << path
+                          << " bytes=" << image.size() << "\n";
+                kernel().finish(ctx, error::kIllegalArgument);
+                return;
+            }
+            std::string load_reason;
+            const std::uint32_t module_uid = load_decrypted_prx(rt, image, path, load_reason);
+            if (module_uid != 0u) {
+                std::cerr << "[module] loaded raw ELF PRX from " << path
+                          << " bytes=" << image.size() << " uid=0x"
+                          << std::hex << module_uid << std::dec << "\n";
+                kernel().finish(ctx, module_uid);
+                return;
+            }
+            std::cerr << "[module] raw ELF PRX load failed from " << path
+                      << " reason=" << load_reason << "\n";
+            kernel().finish(ctx, error::kIllegalArgument);
+            return;
+        }
         load_stock_module(ctx, header.data(), static_cast<std::size_t>(count), " from " + path);
     };
     hle.add("ModuleMgrForUser", "sceKernelLoadModule", load_module_by_path);
