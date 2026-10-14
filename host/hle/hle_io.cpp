@@ -677,6 +677,13 @@ std::uint32_t ioctl_op(Runtime &rt, AllegrexContext &ctx) {
         if (trace_io()) std::cerr << "[pgd] " << file.path << ": data offset=" << input << "\n";
         return 0u;
     }
+    if (command == 0x04100010u) {
+        // PPSSPP's sceNpDrmEdataGetDataSize maps directly to this ioctl.
+        // Once the PGD filter is installed, file.size is the decrypted payload size.
+        const std::uint64_t visible_size = file.filter ? file.size : file.size;
+        if (visible_size > 0x7FFFFFFFu) return io_error::kInvalidArgument;
+        return static_cast<std::uint32_t>(visible_size);
+    }
     if (command == pgd::kIoctlSetKey) {
         std::optional<pgd::Block> vkey;
         if (input != 0u && input_size >= 16u) {
@@ -873,6 +880,21 @@ std::uint32_t setup_edata_file(std::uint32_t fd) {
         return 0u;
     }
 
+    // PSPEDAT kind 1 is an encrypted PRX module, not a PGD data file.
+    // PPSSPP routes those through sceKernelLoadModuleNpDrm and the PRX
+    // decrypter; feeding one to the PGD reader produces a misleading key error.
+    std::array<std::uint8_t, 0x90> header{};
+    const std::size_t header_size = read_open_file(fd, 0u, header.data(), header.size());
+    if (header_size == header.size() && header[0x0E] == 1u) {
+        std::cerr << "[npdrm] " << file.path
+                  << ": PSPEDAT kind=1 (encrypted PRX); must use NPDRM module loader, not PGD filter\\n";
+        return 0u;
+    }
+    if (header_size == header.size() && header[0x0E] != 3u) {
+        std::cerr << "[npdrm] " << file.path << ": unknown PSPEDAT kind="
+                  << static_cast<unsigned>(header[0x0E]) << "\\n";
+        return kPgdUnusable;
+    }
     const std::uint32_t result = open_pgd_filter(fd, 0x90u, std::nullopt, false);
     if (result != 0u)
         std::cerr << "[npdrm] sceNpDrmEdataSetupKey failed for " << file.path
