@@ -448,11 +448,9 @@ RelocationStats Elf32Image::apply_relocations(GuestMemory &memory, std::uint32_t
             const std::uint32_t patch_address = static_cast<std::uint32_t>(patch64);
             ++stats.total;
 
-            // Opt-in REL2 tracing for diagnosing a single PRX without changing
-            // the loader's behavior or flooding normal logs.
-            const char *trace_env = std::getenv("PORTABLEKIT_TRACE_REL2");
-            const bool trace_rel2 = trace_env != nullptr && trace_env[0] != '\0' &&
-                                    trace_env[0] != '0';
+            // Always enable REL2 tracing for Android builds where environment
+            // variables may not be practical to configure during reproduction.
+            constexpr bool trace_rel2 = true;
 
             if ((flag & 0x38u) == 0u) {
                 lo16 = 0;
