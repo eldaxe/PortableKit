@@ -680,7 +680,7 @@ std::uint32_t ioctl_op(Runtime &rt, AllegrexContext &ctx) {
     if (command == 0x04100010u) {
         // PPSSPP's sceNpDrmEdataGetDataSize maps directly to this ioctl.
         // Once the PGD filter is installed, file.size is the decrypted payload size.
-        const std::uint64_t visible_size = file.filter ? file.size : file.size;
+        const std::uint64_t visible_size = file.size;
         if (visible_size > 0x7FFFFFFFu) return io_error::kInvalidArgument;
         return static_cast<std::uint32_t>(visible_size);
     }
@@ -857,6 +857,16 @@ void register_async_io(HleRegistrar &hle) {
 
 } // namespace
 
+std::uint32_t edata_file_data_size(std::uint32_t fd) {
+    const auto found = io().files.find(fd);
+    if (found == io().files.end()) return io_error::kBadFileDescriptor;
+    const OpenFile &file = found->second;
+    if (file.kind != OpenFile::Kind::Disc && file.kind != OpenFile::Kind::Host)
+        return io_error::kBadFileDescriptor;
+    if (file.size > 0x7FFFFFFFu) return io_error::kInvalidArgument;
+    return static_cast<std::uint32_t>(file.size);
+}
+
 std::uint32_t setup_edata_file(std::uint32_t fd) {
     const auto found = io().files.find(fd);
     if (found == io().files.end()) return io_error::kBadFileDescriptor;
@@ -887,12 +897,12 @@ std::uint32_t setup_edata_file(std::uint32_t fd) {
     const std::size_t header_size = read_open_file(fd, 0u, header.data(), header.size());
     if (header_size == header.size() && header[0x0E] == 1u) {
         std::cerr << "[npdrm] " << file.path
-                  << ": PSPEDAT kind=1 (encrypted PRX); must use NPDRM module loader, not PGD filter\\n";
+                  << ": PSPEDAT kind=1 (encrypted PRX); must use NPDRM module loader, not PGD filter\n";
         return 0u;
     }
     if (header_size == header.size() && header[0x0E] != 3u) {
         std::cerr << "[npdrm] " << file.path << ": unknown PSPEDAT kind="
-                  << static_cast<unsigned>(header[0x0E]) << "\\n";
+                  << static_cast<unsigned>(header[0x0E]) << "\n";
         return kPgdUnusable;
     }
     const std::uint32_t result = open_pgd_filter(fd, 0x90u, std::nullopt, false);
