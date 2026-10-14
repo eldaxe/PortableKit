@@ -82,11 +82,16 @@ bool npdrm_get_fixed_key(const std::uint8_t *content_id, std::uint8_t key_mode, 
         std::copy_n(content_id + offset, block.size(), block.begin());
         chain = cipher.encrypt(npdrm_xor(block, chain));
     }
-    // Content ID is 0x30 bytes (three complete blocks), so use BB-MAC K1.
-    const NpDrmBlock subkey = npdrm_double(cipher.encrypt(NpDrmBlock{}));
-    NpDrmBlock last{};
-    std::copy_n(content_id + 0x20u, last.size(), last.begin());
-    NpDrmBlock mac = cipher.encrypt(npdrm_xor(npdrm_xor(last, subkey), chain));
+    // PPSSPP's sceDrmBBMacFinal pads whenever pad_size < 16, including
+    // an exact multiple of 16. Therefore this final block uses K2 (two doublings),
+    // not K1, even though the content ID is exactly 0x30 bytes.
+    NpDrmBlock subkey = npdrm_double(cipher.encrypt(NpDrmBlock{}));
+    subkey = npdrm_double(subkey);
+    NpDrmBlock padding{};
+    padding[0] = 0x80u;
+    NpDrmBlock last = npdrm_xor(padding, subkey);
+    last = npdrm_xor(last, chain);
+    NpDrmBlock mac = cipher.encrypt(last);
     mac = npdrm_xor(mac, mac_mask);
     mac = cipher.encrypt(npdrm_xor(mac, final_key));
     if (key_mode != 0u) mac = portablekit::savedata::Aes128(mode_keys[key_mode - 1u]).encrypt(mac);
