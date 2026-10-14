@@ -694,6 +694,8 @@ std::uint32_t load_decrypted_prx(Runtime &rt, std::span<const std::uint8_t> imag
             std::uint32_t address{};
         };
         std::vector<ExportedFunction> exported_functions;
+        const std::uint64_t block_end =
+            static_cast<std::uint64_t>(block->address) + block->size;
 
         std::uint32_t module_start = 0u;
         std::uint32_t module_stop = 0u;
@@ -770,8 +772,6 @@ std::uint32_t load_decrypted_prx(Runtime &rt, std::span<const std::uint8_t> imag
             reason = "export-table-end-misaligned";
             return 0u;
         }
-        const std::uint64_t block_end =
-            static_cast<std::uint64_t>(block->address) + block->size;
         if ((module_start != 0u &&
              (module_start < block->address || module_start >= block_end ||
               !memory.contains(module_start, 4u))) ||
