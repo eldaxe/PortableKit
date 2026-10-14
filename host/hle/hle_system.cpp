@@ -809,6 +809,16 @@ void register_process(HleRegistrar &hle) {
     // The main executable is the only module; overlays are loaded by game code.
     constexpr std::uint32_t kMainModuleId = 0x01000001u;
     hle.add("ModuleMgrForUser", "sceKernelGetModuleId", [](Runtime &, AllegrexContext &ctx) {
+        const std::uint32_t return_address = ctx.gpr[31];
+        for (const auto &[uid, module] : loaded_prx_modules) {
+            const auto *block = kernel().find_block(module.memory_block);
+            if (block == nullptr) continue;
+            const std::uint64_t end = static_cast<std::uint64_t>(block->address) + block->size;
+            if (return_address >= block->address && static_cast<std::uint64_t>(return_address) < end) {
+                kernel().finish(ctx, uid);
+                return;
+            }
+        }
         kernel().finish(ctx, kMainModuleId);
     });
     hle.add("ModuleMgrForUser", "sceKernelGetModuleIdByAddress", [](Runtime &, AllegrexContext &ctx) {
