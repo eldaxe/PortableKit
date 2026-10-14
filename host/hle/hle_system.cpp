@@ -298,8 +298,8 @@ void register_platform(HleRegistrar &hle) {
     // The power switch is never used here, so holding it off changes nothing.
     hle.add("sceSuspendForUser", "sceKernelPowerLock", success);
     hle.add("sceSuspendForUser", "sceKernelPowerUnlock", success);
-    // A disc game's licensee key and a PSN title's data key: nothing here
-    // decrypts with them yet. Chinatown Wars imports both.
+    // NPDRM licensee-key state used by the diagnostic/module path below.
+    // Full NPDRM module-key derivation is not implemented here yet.
     hle.add("scePspNpDrm_user", "sceNpDrmSetLicenseeKey", [](Runtime &rt, AllegrexContext &ctx) {
         const std::uint32_t address = arg(ctx, 0);
         if (address == 0u) {
