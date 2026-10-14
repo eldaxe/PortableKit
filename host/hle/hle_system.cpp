@@ -637,11 +637,19 @@ std::uint32_t load_decrypted_prx(Runtime &rt, std::span<const std::uint8_t> imag
         }
 
         std::uint64_t image_end = 0u;
+        std::uint32_t allocation_alignment = 0x1000u;
         for (const auto &segment : elf.segments()) {
             if (segment.type != 1u) continue; // PT_LOAD
             if (segment.memory_size < segment.file_size) {
                 reason = "pt-load-memsz-smaller-than-filesz";
                 return 0u;
+            }
+            if (segment.alignment > 1u) {
+                if ((segment.alignment & (segment.alignment - 1u)) != 0u) {
+                    reason = "pt-load-alignment-is-not-a-power-of-two";
+                    return 0u;
+                }
+                allocation_alignment = std::max(allocation_alignment, segment.alignment);
             }
             image_end = std::max(image_end,
                 static_cast<std::uint64_t>(segment.vaddr) + segment.memory_size);
@@ -657,8 +665,8 @@ std::uint32_t load_decrypted_prx(Runtime &rt, std::span<const std::uint8_t> imag
         }
 
         const std::string module_name = source.empty() ? "npdrm-prx" : source.substr(source.find_last_of('/') == std::string::npos ? 0u : source.find_last_of('/') + 1u);
-        block_uid = kernel().allocate_block(module_name, 0u,
-            static_cast<std::uint32_t>(allocation_size64), 0u);
+        block_uid = kernel().allocate_block(module_name, 3u,
+            static_cast<std::uint32_t>(allocation_size64), allocation_alignment);
         const auto *block = kernel().find_block(block_uid);
         if (block == nullptr) {
             reason = "prx-memory-allocation-failed";
@@ -819,6 +827,10 @@ std::uint32_t load_decrypted_prx(Runtime &rt, std::span<const std::uint8_t> imag
         std::cerr << "[npdrm-module] loaded " << state.name
                   << " uid=0x" << std::hex << uid
                   << " base=0x" << load_base
+                  << " block-size=0x" << block->size
+                  << " block-uid=0x" << std::dec << block_uid
+                  << " align=0x" << std::hex << allocation_alignment
+                  << " end=0x" << (static_cast<std::uint64_t>(block->address) + block->size)
                   << " entry=0x" << elf.runtime_entry(load_base)
                   << " module_start=0x" << module_start
                   << " imports=" << std::dec << imports.size()
@@ -1201,6 +1213,13 @@ void register_process(HleRegistrar &hle) {
         }
         const LoadedPrxModule module = found->second;
         const auto *block = kernel().find_block(module.memory_block);
+        std::cerr << "[npdrm-module] unloading " << module.name
+                  << " uid=0x" << std::hex << uid
+                  << " base=0x" << module.load_base;
+        if (block != nullptr) {
+            std::cerr << " block-size=0x" << block->size;
+        }
+        std::cerr << std::dec << "\n";
         if (block != nullptr) {
             const std::uint32_t begin = block->address;
             const std::uint64_t end = static_cast<std::uint64_t>(begin) + block->size;
