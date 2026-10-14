@@ -788,8 +788,23 @@ void register_process(HleRegistrar &hle) {
                                         full_prx, module_key, decrypted_payload, decrypt_reason);
                                     std::cerr << " payload_decrypt=" << (decrypted ? "success" : "failed")
                                               << " payload_reason=" << decrypt_reason;
-                                    if (decrypted)
+                                    if (decrypted) {
                                         std::cerr << " payload_bytes=" << decrypted_payload.size();
+                                        const std::string payload_magic = decrypted_payload.size() >= 4u
+                                            ? std::string(reinterpret_cast<const char *>(decrypted_payload.data()), 4u)
+                                            : std::string("<short>");
+                                        std::cerr << " payload_magic=" << payload_magic;
+                                        std::string load_reason;
+                                        const std::uint32_t module_uid = load_decrypted_prx(
+                                            rt, decrypted_payload, path, load_reason);
+                                        if (module_uid != 0u) {
+                                            std::cerr << " module_load=success module_uid=0x"
+                                                      << std::hex << module_uid << std::dec << "\n";
+                                            kernel().finish(ctx, module_uid);
+                                            return;
+                                        }
+                                        std::cerr << " module_load=failed module_reason=" << load_reason;
+                                    }
                                 } else {
                                     std::cerr << " payload_decrypt=failed payload_reason=prx-read-failed";
                                 }
@@ -803,6 +818,11 @@ void register_process(HleRegistrar &hle) {
                 std::cerr << " payload_kind=PGD-data";
             }
             std::cerr << "\n";
+            if (kind == 1u) {
+                // Never return a synthetic UID for a PRX that failed decryption or loading.
+                kernel().finish(ctx, error::kIllegalArgument);
+                return;
+            }
         }
         load_stock_module(ctx, header.data(), static_cast<std::size_t>(count), " from " + path);
     };
