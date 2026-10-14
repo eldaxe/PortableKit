@@ -8,9 +8,11 @@
 #include "psprecomp/runtime.hpp"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <cstdlib>
+#include <exception>
 #include <iostream>
 #include <limits>
 #include <unordered_map>
@@ -19,6 +21,21 @@
 namespace psprecomp {
 
 namespace {
+
+struct InterpreterTraceEntry {
+    std::uint32_t pc{};
+    std::uint32_t word{};
+    std::array<std::uint32_t, 16> gpr{};
+};
+
+constexpr std::size_t kInstructionTraceCapacity = 16u;
+constexpr std::array<std::uint8_t, 16> kTraceRegisterIndices{
+    2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 11u, 16u, 17u, 18u, 19u, 29u, 31u
+};
+constexpr std::array<const char *, 16> kTraceRegisterNames{
+    "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1",
+    "t2", "t3", "s0", "s1", "s2", "s3", "sp", "ra"
+};
 
 bool g_settings_loaded = false;
 bool g_enabled = true;
@@ -912,6 +929,50 @@ InterpreterExit interpret_allegrex(Runtime &rt, AllegrexContext &ctx,
     const std::uint64_t budget = instruction_budget != 0u ? instruction_budget : g_budget;
     GuestMemory &memory = rt.memory();
 
+    // Keep a small rolling history of interpreted instructions. If an instruction
+    // throws while accessing guest memory, the crash log otherwise shows only
+    // the final register state and cannot explain how a pointer became invalid.
+    std::array<InterpreterTraceEntry, kInstructionTraceCapacity> instruction_trace{};
+    std::size_t trace_next = 0u;
+    std::size_t trace_count = 0u;
+    const auto remember_instruction = [&](std::uint32_t address, const DecodedInstruction &instruction) {
+        InterpreterTraceEntry &entry = instruction_trace[trace_next];
+        entry.pc = address;
+        entry.word = instruction.word;
+        for (std::size_t index = 0u; index < kTraceRegisterIndices.size(); ++index)
+            entry.gpr[index] = ctx.gpr[kTraceRegisterIndices[index]];
+        trace_next = (trace_next + 1u) % instruction_trace.size();
+        trace_count = std::min(trace_count + 1u, instruction_trace.size());
+    };
+    const auto dump_instruction_trace = [&](std::uint32_t fault_pc, const char *reason) {
+        std::cerr << "[interpreter-fault-trace] pc=" << hex32(fault_pc)
+                  << " reason=" << reason << "\\n";
+        const std::size_t first = (trace_next + instruction_trace.size() - trace_count) %
+                                  instruction_trace.size();
+        for (std::size_t item = 0u; item < trace_count; ++item) {
+            const InterpreterTraceEntry &entry =
+                instruction_trace[(first + item) % instruction_trace.size()];
+            std::cerr << "[interpreter-fault-trace] "
+                      << (entry.pc == fault_pc ? "=>" : "  ")
+                      << hex32(entry.pc) << " word=" << hex32(entry.word);
+            for (std::size_t reg = 0u; reg < kTraceRegisterNames.size(); ++reg)
+                std::cerr << " " << kTraceRegisterNames[reg] << "=" << hex32(entry.gpr[reg]);
+            std::cerr << "\\n";
+        }
+    };
+    const auto execute_simple_traced = [&](const DecodedInstruction &instruction,
+                                           std::uint32_t address) {
+        try {
+            return execute_simple(rt, ctx, instruction, address);
+        } catch (const std::exception &error) {
+            dump_instruction_trace(address, error.what());
+            throw;
+        } catch (...) {
+            dump_instruction_trace(address, "unknown exception");
+            throw;
+        }
+    };
+
     std::uint32_t pc = ctx.pc;
     if (!memory.contains(pc, 4u)) return InterpreterExit::Unreachable;
 
@@ -948,10 +1009,11 @@ InterpreterExit interpret_allegrex(Runtime &rt, AllegrexContext &ctx,
         if (!g_watch.empty() && std::binary_search(g_watch.begin(), g_watch.end(), pc))
             report_watch(rt, ctx, pc);
         const DecodedInstruction decoded = decode_allegrex(memory.aot_load32(pc));
+        remember_instruction(pc, decoded);
         ++executed;
 
         if (!decoded.has_delay_slot()) {
-            if (!execute_simple(rt, ctx, decoded, pc))
+            if (!execute_simple_traced(decoded, pc))
                 return leave(rt.stopped() ? InterpreterExit::Stopped : InterpreterExit::Dispatch);
             pc += 4u;
             continue;
@@ -1004,9 +1066,10 @@ InterpreterExit interpret_allegrex(Runtime &rt, AllegrexContext &ctx,
         }
 
         if (run_slot) {
+            remember_instruction(pc + 4u, slot);
             ++executed;
             ctx.pc = pc + 4u;
-            if (!execute_simple(rt, ctx, slot, pc + 4u))
+            if (!execute_simple_traced(slot, pc + 4u))
                 return leave(rt.stopped() ? InterpreterExit::Stopped : InterpreterExit::Dispatch);
         }
         pc = next;
