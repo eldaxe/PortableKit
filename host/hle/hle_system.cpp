@@ -779,14 +779,32 @@ std::uint32_t load_decrypted_prx(Runtime &rt, std::span<const std::uint8_t> imag
         state.gp = module->gp;
         state.name = module->name.empty() ? module_name : module->name;
         loaded_prx_modules[uid] = state;
+        std::size_t rel1_segments = 0;
+        std::size_t rel2_segments = 0;
+        std::size_t psprel_sections = 0;
+        for (const auto &segment : elf.segments()) {
+            if (segment.type == 0x700000A0u) ++rel1_segments;
+            if (segment.type == 0x700000A1u) ++rel2_segments;
+        }
+        for (const auto &section : elf.sections()) {
+            if (section.type == 0x700000A0u) ++psprel_sections;
+        }
         std::cerr << "[npdrm-module] loaded " << state.name
                   << " uid=0x" << std::hex << uid
                   << " base=0x" << load_base
                   << " entry=0x" << elf.runtime_entry(load_base)
                   << " module_start=0x" << module_start
                   << " imports=" << std::dec << imports.size()
-                  << " rel2-invalid=" << relocations.invalid
-                  << " rel2-unsupported=" << relocations.unsupported << "\n";
+                  << " rel1-segments=" << rel1_segments
+                  << " rel2-segments=" << rel2_segments
+                  << " psprel-sections=" << psprel_sections
+                  << " reloc-total=" << relocations.total
+                  << " reloc-r32=" << relocations.r_mips_32
+                  << " reloc-r26=" << relocations.r_mips_26
+                  << " reloc-hi16=" << relocations.r_mips_hi16
+                  << " reloc-lo16=" << relocations.r_mips_lo16
+                  << " reloc-invalid=" << relocations.invalid
+                  << " reloc-unsupported=" << relocations.unsupported << "\n";
         reason = "ok";
         return uid;
     } catch (const std::exception &error) {
