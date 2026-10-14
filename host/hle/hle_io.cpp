@@ -850,6 +850,29 @@ void register_async_io(HleRegistrar &hle) {
 
 } // namespace
 
+std::uint32_t setup_edata_file(std::uint32_t fd) {
+    const auto found = io().files.find(fd);
+    if (found == io().files.end()) return io_error::kBadFileDescriptor;
+    const OpenFile &file = found->second;
+    if (file.kind != OpenFile::Kind::Disc && file.kind != OpenFile::Kind::Host)
+        return io_error::kBadFileDescriptor;
+
+    std::array<std::uint8_t, 8> magic{};
+    const std::size_t got = read_open_file(fd, 0u, magic.data(), magic.size());
+    constexpr std::array<std::uint8_t, 8> kEdatMagic{0u, 'P', 'S', 'P', 'E', 'D', 'A', 'T'};
+    if (got < magic.size() || magic != kEdatMagic) {
+        if (trace_io()) std::cerr << "[npdrm] sceNpDrmEdataSetupKey: " << file.path
+                                  << " is not an EDAT container; leaving it unfiltered\\n";
+        return 0u;
+    }
+
+    const std::uint32_t result = open_pgd_filter(fd, 0x90u, std::nullopt, false);
+    if (result != 0u)
+        std::cerr << "[npdrm] sceNpDrmEdataSetupKey failed for " << file.path
+                  << " error=" << psprecomp::hex32(result) << "\\n";
+    return result;
+}
+
 void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, const std::filesystem::path &memory_stick) {
     if (!disc_image.empty()) io().disc = std::make_unique<IsoImage>(disc_image);
     io().memory_stick = memory_stick;
