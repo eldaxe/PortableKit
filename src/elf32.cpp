@@ -418,7 +418,6 @@ RelocationStats Elf32Image::apply_relocations(GuestMemory &memory, std::uint32_t
                 off_segment < 0 || static_cast<std::size_t>(off_segment) >= segments_.size() ||
                 segments_[static_cast<std::size_t>(off_segment)].type != kPtLoad) {
                 ++stats.invalid;
-                last_type = -1;
                 continue;
             }
             const std::uint32_t relocate_to = segment_addresses[address_segment];
@@ -428,7 +427,6 @@ RelocationStats Elf32Image::apply_relocations(GuestMemory &memory, std::uint32_t
             if (patch64 > 0xFFFFFFFFull ||
                 !memory.contains(static_cast<std::uint32_t>(patch64), 4u)) {
                 ++stats.invalid;
-                last_type = -1;
                 continue;
             }
             const std::uint32_t patch_address = static_cast<std::uint32_t>(patch64);
