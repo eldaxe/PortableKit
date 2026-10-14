@@ -736,8 +736,8 @@ void register_platform(HleRegistrar &hle) {
     // The power switch is never used here, so holding it off changes nothing.
     hle.add("sceSuspendForUser", "sceKernelPowerLock", success);
     hle.add("sceSuspendForUser", "sceKernelPowerUnlock", success);
-    // NPDRM licensee-key state and module-key derivation for encrypted SPRX diagnostics.
-    // The inner PRX decryption and dynamic module loader remain unimplemented.
+    // NPDRM licensee-key state, type-5 header validation and KIRK CMD1 payload decryption.
+    // Mapping the decrypted ELF, relocations/imports and module_start still needs a loader.
     hle.add("scePspNpDrm_user", "sceNpDrmSetLicenseeKey", [](Runtime &rt, AllegrexContext &ctx) {
         const std::uint32_t address = arg(ctx, 0);
         if (address == 0u) {
