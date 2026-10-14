@@ -117,6 +117,35 @@ std::optional<Block> header_mac(const KeySource &keys, std::span<const std::uint
     return cipher.encrypt(xor_block(xor_block(savedata::cmac(cipher, data), vkey), *mask));
 }
 
+std::optional<Block> derive_vkey(std::span<const std::uint8_t> header, const KeySource &keys, std::string &error) {
+    if (header.size() < kHeaderSize || header[0] != 0u || header[1] != 'P' ||
+        header[2] != 'G' || header[3] != 'D') {
+        error = "not a PGD file";
+        return std::nullopt;
+    }
+    const std::uint32_t key_index = le32(header, 0x04u);
+    const std::uint32_t drm_type = le32(header, 0x08u);
+    if (key_index != kKeyIndex || drm_type != kDrmType) {
+        error = "a kind of PGD not supported yet (key index " + std::to_string(key_index) +
+                ", DRM type " + std::to_string(drm_type) + ")";
+        return std::nullopt;
+    }
+    const Key16 *key = keys.kirk ? keys.kirk(0x38u) : nullptr;
+    if (key == nullptr) {
+        error = "the keys file has no " + slot_name(0x38u);
+        return std::nullopt;
+    }
+    const Key16 *mask = keys.fixed ? keys.fixed(kMacMask) : nullptr;
+    if (mask == nullptr) {
+        error = "the keys file has no " + std::string(fixed_key_name(kMacMask));
+        return std::nullopt;
+    }
+    const Aes128 cipher(*key);
+    const Block mac_plain = cipher.decrypt(read_block(header, 0x70u));
+    const Block content_mac = savedata::cmac(cipher, header.first(kMacSpan));
+    return xor_block(xor_block(mac_plain, content_mac), *mask);
+}
+
 bool desc_plausible(const Desc &desc, std::uint64_t file_size) {
     return desc.version == 0u && desc.block_size == 0x400u && desc.data_offset == kHeaderSize && desc.data_size != 0u &&
            desc.data_size <= file_size;
