@@ -252,15 +252,38 @@ void register_process(HleRegistrar &hle) {
                       << static_cast<unsigned>(kind)
                       << (kind == 1u ? " (PRX)" : kind == 3u ? " (PGD/data)" : " (unknown)")
                       << " licensee_key_set=" << (npdrm_licensee_key_set ? "yes" : "no");
+            const std::uint32_t payload_offset =
+                static_cast<std::uint32_t>(header[0x0Cu]) |
+                (static_cast<std::uint32_t>(header[0x0Du]) << 8u);
+            std::cerr << " payload_offset=0x" << std::hex << payload_offset << std::dec;
             if (kind == 1u) {
                 NpDrmBlock module_key{};
-                std::cerr << " module_key_derived="
-                          << (npdrm_derive_module_key(header.data(), module_key) ? "yes" : "no");
+                const bool key_ok = npdrm_derive_module_key(header.data(), module_key);
+                std::cerr << " module_key_derived=" << (key_ok ? "yes" : "no");
+                std::array<std::uint8_t, 0x150> inner{};
+                const std::int64_t inner_count = payload_offset >= 0x90u
+                    ? read_guest_file(path, payload_offset, inner.data(), inner.size()) : -1;
+                if (inner_count >= static_cast<std::int64_t>(inner.size()) &&
+                    std::memcmp(inner.data(), "~PSP", 4u) == 0) {
+                    const std::uint32_t tag =
+                        static_cast<std::uint32_t>(inner[0xD0u]) |
+                        (static_cast<std::uint32_t>(inner[0xD1u]) << 8u) |
+                        (static_cast<std::uint32_t>(inner[0xD2u]) << 16u) |
+                        (static_cast<std::uint32_t>(inner[0xD3u]) << 24u);
+                    const std::uint32_t psp_size =
+                        static_cast<std::uint32_t>(inner[0x2Cu]) |
+                        (static_cast<std::uint32_t>(inner[0x2Du]) << 8u) |
+                        (static_cast<std::uint32_t>(inner[0x2Eu]) << 16u) |
+                        (static_cast<std::uint32_t>(inner[0x2Fu]) << 24u);
+                    std::cerr << " inner=~PSP tag=0x" << std::hex << tag
+                              << " decrypt_mode=0x" << static_cast<unsigned>(inner[0x7Cu])
+                              << " psp_size=0x" << psp_size << std::dec;
+                } else {
+                    std::cerr << " inner_prx_header=unavailable_or_invalid";
+                }
+            } else if (kind == 3u) {
+                std::cerr << " payload_kind=PGD-data";
             }
-            if (count >= 0x94 && std::memcmp(header.data() + 0x90, "~PSP", 4u) == 0)
-                std::cerr << " inner_at_0x90=~PSP";
-            else
-                std::cerr << " inner_at_0x90_not_~PSP_in_probe";
             std::cerr << "\n";
         }
         load_stock_module(ctx, header.data(), static_cast<std::size_t>(count), " from " + path);
