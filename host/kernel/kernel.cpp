@@ -585,6 +585,10 @@ std::optional<std::uint64_t> Kernel::next_event_us() const {
         if (timer.active && timer.handler != 0u && timer.schedule_us >= vtimer_value(timer))
             consider(now_us_ + (timer.schedule_us - vtimer_value(timer)));
     }
+    for (const auto &[uid, alarm] : alarms) {
+        (void)uid;
+        if (alarm.schedule_us != UINT64_MAX) consider(alarm.schedule_us);
+    }
     return next;
 }
 
@@ -609,6 +613,34 @@ void Kernel::process_timers() {
             continue;
         }
         if (thread->wait.deadline_us && *thread->wait.deadline_us <= now_us_) finish_wait_timeout(*thread);
+    }
+    for (auto it = alarms.begin(); it != alarms.end();) {
+        if (it->second.schedule_us > now_us_) {
+            ++it;
+            continue;
+        }
+        const SceUID alarm_uid = it->first;
+        const Alarm alarm = it->second;
+        // UINT64_MAX disarms the alarm until the callback decides whether to repeat.
+        it->second.schedule_us = UINT64_MAX;
+        InterruptCall call{};
+        call.function = alarm.handler;
+        call.alarm_uid = alarm_uid;
+        call.arguments = {alarm.common, 0u, 0u, 0u};
+        call.on_return = [alarm_uid, deadline = alarm.schedule_us](std::uint32_t result) {
+            auto found = kernel().alarms.find(alarm_uid);
+            if (found == kernel().alarms.end()) return;
+            const auto delay = static_cast<std::int32_t>(result);
+            if (delay <= 0) {
+                kernel().alarms.erase(found);
+                return;
+            }
+            const std::uint64_t now = kernel().now_us();
+            const std::uint64_t next = deadline + static_cast<std::uint32_t>(delay);
+            found->second.schedule_us = next > now ? next : now + static_cast<std::uint32_t>(delay);
+        };
+        queue_interrupt(std::move(call));
+        ++it;
     }
     for (auto &[uid, timer] : vtimers) {
         if (!timer.active || timer.handler == 0u || vtimer_value(timer) < timer.schedule_us) continue;
@@ -932,6 +964,16 @@ std::uint32_t Kernel::free_memory() const noexcept {
 // Interrupts
 
 void Kernel::queue_interrupt(InterruptCall call) { pending_interrupts_.push_back(std::move(call)); }
+
+std::uint32_t Kernel::cancel_alarm(SceUID uid) {
+    const auto found = alarms.find(uid);
+    if (found == alarms.end()) return error::kUnknownAlmid;
+    alarms.erase(found);
+    // If the deadline has passed but dispatch has not started, suppress the
+    // queued callback as PPSSPP does when destroying the alarm object.
+    std::erase_if(pending_interrupts_, [uid](const InterruptCall &call) { return call.alarm_uid == uid; });
+    return 0u;
+}
 
 void Kernel::notify_callback(SceUID callback, std::uint32_t argument) {
     const auto found = callbacks.find(callback);
