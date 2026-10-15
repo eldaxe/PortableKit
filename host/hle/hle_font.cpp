@@ -332,6 +332,17 @@ void register_font(HleRegistrar &hle) {
         kernel().finish(ctx, 0u);
     });
 
+    // PPSSPP's sceFontFlush releases the library-owned character-info bitmap.
+    // This backend writes character info directly to the guest-provided output
+    // buffer and never allocates that internal bitmap, so a valid font handle
+    // has nothing extra to release here. Still validate the handle and return
+    // the PSP error used by PPSSPP for an invalid font handle.
+    hle.add("sceLibFont", "sceFontFlush", [](Runtime &, AllegrexContext &ctx) {
+        const std::uint32_t font = arg(ctx, 0);
+        trace("Flush font=%08X ra=%08X", font, ctx.gpr[31]);
+        kernel().finish(ctx, font == kFontHandle ? 0u : 0x80460003u);
+    });
+
     hle.add("sceLibFont", "sceFontClose", [](Runtime &, AllegrexContext &ctx) {
         trace("Close font=%08X", arg(ctx, 0));
         kernel().finish(ctx, 0u);

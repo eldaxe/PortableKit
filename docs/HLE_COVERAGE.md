@@ -22,6 +22,12 @@ NIDs are added to `configs/nids.csv` only where the first word of SHA-1 of the n
 | MHP2G | 55 | 0 | |
 | Patapon | 37 | 0 | |
 
+## God Eater 2 focused porting notes
+
+- `sceLibFont::sceFontFlush`: implemented for the existing host-font backend. The backend renders glyphs into caller-owned guest buffers and does not allocate PPSSPP's internal character-info bitmap, so a valid host font handle has no internal bitmap to flush. Valid handle `0x00F0F100` returns 0; an invalid handle returns `SCE_FONT_ERROR_INVALID_PARAMETER` (`0x80460003`). This behavior is based on the current PortableKit implementation and PPSSPP's `Core/HLE/sceFont.cpp`; it still needs a God Eater 2 runtime test.
+- Known GE2 crash is not explained by this API: the supplied log faults at `0x0894125C` on `lw s2, 0(s0)` with `s0 = 0x00000008`. Do not treat adding font calls as a fix for that invalid guest pointer. Continue tracing the caller and the value `0x08` before adding more HLE.
+- Keep HLE work evidence-led: add imports only when observed in the GE2 log or verified in the game's import tables, and distinguish implemented, tested, and unverified behavior.
+
 ## Verified on a game
 
 | Call | Game | What it answers |
