@@ -230,6 +230,24 @@ RelocationStats Elf32Image::apply_relocations(GuestMemory &memory, std::uint32_t
     if (!is_psp_prx()) return stats;
 
     const auto segment_addresses = segment_runtime_addresses(load_base);
+    // Temporary, narrowly-scoped diagnostics for the God Eater 2 null dereference.
+    // The failing PC is at Title PRX + 0x1E204; show whether the LUI at +0x1E200
+    // is present in the relocation stream and what value it has before/after REL2.
+    const bool trace_title_window = source_name_.find("god_m001_Title") != std::string::npos;
+    const std::uint32_t title_window_begin = load_base + 0x1E1E0u;
+    const std::uint32_t title_window_end = load_base + 0x1E220u;
+    auto trace_title_words = [&](const char *stage) {
+        if (!trace_title_window) return;
+        std::cerr << "[rel2-title-window] stage=" << stage
+                  << " source=" << source_name_ << " base=0x" << std::hex << load_base << '\n';
+        for (std::uint32_t address = title_window_begin; address < title_window_end; address += 4u) {
+            if (!memory.contains(address, 4u)) continue;
+            std::cerr << "[rel2-title-window] word address=0x" << std::hex << address
+                      << " offset=0x" << (address - load_base)
+                      << " value=0x" << memory.load32(address) << '\n';
+        }
+    };
+    trace_title_words("before-relocations");
     auto apply_rel_table = [&](std::span<const std::uint8_t> raw) {
         if ((raw.size() % sizeof(Rel32)) != 0u) throw Error("Malformed PSP relocation table");
         const std::size_t count = raw.size() / sizeof(Rel32);
@@ -511,6 +529,16 @@ RelocationStats Elf32Image::apply_relocations(GuestMemory &memory, std::uint32_t
                 last_type = static_cast<std::int32_t>(type);
                 continue;
             }
+            if (trace_title_window && patch_address >= title_window_begin &&
+                patch_address < title_window_end) {
+                std::cerr << "[rel2-title-window] relocation address=0x" << std::hex << patch_address
+                          << " offset=0x" << (patch_address - load_base)
+                          << " target=0x" << relocate_to
+                          << " type=" << std::dec << type
+                          << " flag=0x" << std::hex << flag
+                          << " lo16=0x" << static_cast<std::uint16_t>(lo16)
+                          << " before=0x" << original << " after=0x" << op << '\n';
+            }
             if (op != original) memory.store32(patch_address, op);
             if (trace_rel2) {
                 std::cerr << "[rel2] address=0x" << std::hex << patch_address
@@ -521,6 +549,7 @@ RelocationStats Elf32Image::apply_relocations(GuestMemory &memory, std::uint32_t
         }
     }
 
+    trace_title_words("after-relocations");
     return stats;
 }
 
