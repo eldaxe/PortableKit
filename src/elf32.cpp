@@ -236,6 +236,16 @@ RelocationStats Elf32Image::apply_relocations(GuestMemory &memory, std::uint32_t
     const bool trace_title_window = source_name_.find("god_m001_Title") != std::string::npos;
     const std::uint32_t title_window_begin = load_base + 0x1E1E0u;
     const std::uint32_t title_window_end = load_base + 0x1E220u;
+    std::int32_t title_patch_segment = -1;
+    for (std::size_t i = 0; i < segments_.size(); ++i) {
+        if (segments_[i].type != kPtLoad) continue;
+        const std::uint64_t begin = segment_addresses[i];
+        const std::uint64_t end = begin + segments_[i].memory_size;
+        if (title_window_begin >= begin && title_window_begin < end) {
+            title_patch_segment = static_cast<std::int32_t>(i);
+            break;
+        }
+    }
     auto trace_title_words = [&](const char *stage) {
         if (!trace_title_window) return;
         std::cerr << "[rel2-title-window] stage=" << stage
@@ -401,6 +411,8 @@ RelocationStats Elf32Image::apply_relocations(GuestMemory &memory, std::uint32_t
             return value;
         };
         while (cursor < raw.size()) {
+            const std::size_t command_file_offset = cursor;
+            const std::int64_t previous_rel_base = rel_base;
             const std::uint16_t command = read_u16();
             const std::uint32_t flag_mask = (std::uint32_t{1} << flag_bits) - 1u;
             const std::uint32_t seg_mask = (std::uint32_t{1} << seg_bits) - 1u;
@@ -421,6 +433,20 @@ RelocationStats Elf32Image::apply_relocations(GuestMemory &memory, std::uint32_t
                     rel_base = read_u32();
                 } else {
                     throw Error("Invalid PSP REL2 base-size flag");
+                }
+                if (trace_title_window && title_patch_segment >= 0 && off_segment == title_patch_segment &&
+                    rel_base >= 0 && rel_base <= 0x7FFFFFFFll) {
+                    const std::uint64_t patch = static_cast<std::uint64_t>(
+                        segment_addresses[static_cast<std::size_t>(off_segment)]) +
+                        static_cast<std::uint64_t>(rel_base);
+                    if (patch >= title_window_begin - 0x20u && patch < title_window_end + 0x20u) {
+                        std::cerr << "[rel2-title-command] file=0x" << std::hex << command_file_offset
+                                  << " raw=0x" << command << " base-command=1"
+                                  << " flag=0x" << flag << " seg=" << std::dec << segment
+                                  << " patch-seg=" << off_segment << " previous-base=0x" << std::hex
+                                  << previous_rel_base << " new-base=0x" << rel_base
+                                  << " patch=0x" << patch << '\n';
+                    }
                 }
                 continue;
             }
@@ -470,6 +496,16 @@ RelocationStats Elf32Image::apply_relocations(GuestMemory &memory, std::uint32_t
             }
             const std::uint32_t patch_address = static_cast<std::uint32_t>(patch64);
             ++stats.total;
+            if (trace_title_window && patch_address >= title_window_begin - 0x20u &&
+                patch_address < title_window_end + 0x20u) {
+                std::cerr << "[rel2-title-command] file=0x" << std::hex << command_file_offset
+                          << " raw=0x" << command << " base-command=0"
+                          << " flag=0x" << flag << " type=" << std::dec << type
+                          << " seg=" << address_segment << " patch-seg=" << off_segment
+                          << " previous-base=0x" << std::hex << previous_rel_base
+                          << " new-base=0x" << rel_base << " patch=0x" << patch_address
+                          << " target=0x" << segment_addresses[address_segment] << '\n';
+            }
 
             // Per-relocation logging can produce multi-megabyte logs and bury
             // the actual fault. Enable it explicitly for a focused loader
