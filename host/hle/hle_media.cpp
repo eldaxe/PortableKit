@@ -1017,13 +1017,11 @@ void register_audio(HleRegistrar &hle) {
     });
     hle.add("sceSasCore", "__sceSasSetKeyOn", [](Runtime &, AllegrexContext &ctx) {
         if (trace_sas()) std::cerr << "[sas] key on " << arg(ctx, 1) << "\n";
-        audio::sas_core(arg(ctx, 0)).key_on(arg(ctx, 1));
-        kernel().finish(ctx, 0u);
+        kernel().finish(ctx, audio::sas_core(arg(ctx, 0)).key_on(arg(ctx, 1)));
     });
     hle.add("sceSasCore", "__sceSasSetKeyOff", [](Runtime &, AllegrexContext &ctx) {
         if (trace_sas()) std::cerr << "[sas] key off " << arg(ctx, 1) << "\n";
-        audio::sas_core(arg(ctx, 0)).key_off(arg(ctx, 1));
-        kernel().finish(ctx, 0u);
+        kernel().finish(ctx, audio::sas_core(arg(ctx, 0)).key_off(arg(ctx, 1)));
     });
     hle.try_add("sceSasCore", "__sceSasSetPause", [](Runtime &, AllegrexContext &ctx) {
         audio::sas_core(arg(ctx, 0)).set_pause(arg(ctx, 1), arg(ctx, 2) != 0u);

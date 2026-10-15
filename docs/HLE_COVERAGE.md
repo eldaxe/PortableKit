@@ -22,6 +22,13 @@ NIDs are added to `configs/nids.csv` only where the first word of SHA-1 of the n
 | MHP2G | 55 | 0 | |
 | Patapon | 37 | 0 | |
 
+## God Eater 2 audio/video follow-up
+
+- `sceSasCore::__sceSasSetKeyOn` and `__sceSasSetKeyOff`: return values now follow PPSSPP's behavior for invalid voices (`0x80420010`) and paused/already-playing/inactive voices (`0x80420016`), instead of always reporting success. This matters because games can branch on these results during voice setup.
+- The software SAS mixer, ATRAC3/ATRAC3plus decoder, H.264 decoder, PSMF demuxer and MPEG ring-buffer APIs already exist in PortableKit. Android logs must show calls reaching `sceMpegRingbufferPut`, `sceMpegGetAvcAu`/`sceMpegGetAtracAu`, `sceMpegAvcDecode` and `sceMpegAtracDecode` before changing decoder logic.
+- In the latest supplied log, FFmpeg reports `H264=yes ATRAC=yes`, but the movie trace stops after `sceMpegRingbufferQueryPackNum`, `sceMpegRingbufferConstruct` and `sceMpegCreate`. There are no subsequent ring-buffer callback, access-unit or decode calls before the guest faults at `0x0894125C`. That is evidence the playback pipeline is not reaching its decode stage yet; it is not evidence that the H.264/ATRAC decoders themselves are failing.
+- Do not paper over this with fabricated black-frame or silent-audio output. First get the guest past the current fault/stall so its movie feeder and decode calls can run, then use `TRACE_MPEG` and `TRACE_AUDIO` output to diagnose actual packets, decoded frames and PCM.
+
 ## God Eater 2 focused porting notes
 
 - `sceLibFont::sceFontFlush`: implemented for the existing host-font backend. The backend renders glyphs into caller-owned guest buffers and does not allocate PPSSPP's internal character-info bitmap, so a valid host font handle has no internal bitmap to flush. Valid handle `0x00F0F100` returns 0; an invalid handle returns `SCE_FONT_ERROR_INVALID_PARAMETER` (`0x80460003`). This behavior is based on the current PortableKit implementation and PPSSPP's `Core/HLE/sceFont.cpp`; it still needs a God Eater 2 runtime test.
