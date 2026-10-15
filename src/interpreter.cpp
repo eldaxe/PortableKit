@@ -1008,7 +1008,34 @@ InterpreterExit interpret_allegrex(Runtime &rt, AllegrexContext &ctx,
         ctx.pc = pc;
         if (!g_watch.empty() && std::binary_search(g_watch.begin(), g_watch.end(), pc))
             report_watch(rt, ctx, pc);
-        const DecodedInstruction decoded = decode_allegrex(memory.aot_load32(pc));
+        const std::uint32_t instruction_word = memory.aot_load32(pc);
+        // Temporary GE2 bring-up workaround: skip only the known Title PRX
+        // null-dereference pair at its observed load address. This preserves
+        // v1 rather than executing LUI v1, 0 followed by LW v1, 0(v1).
+        // Keep the full neighboring instruction pattern check so unrelated code
+        // and normal Allegrex LUI/LW semantics remain unchanged.
+        const bool ge2_title_window = pc == 0x08B72200u || pc == 0x08B72204u;
+        if (ge2_title_window && memory.contains(pc, 16u) &&
+            instruction_word == 0x3C030000u &&
+            memory.aot_load32(pc + 4u) == 0x8C630000u &&
+            memory.aot_load32(pc + 8u) == 0x00002021u &&
+            memory.aot_load32(pc + 12u) == 0xAC400074u) {
+            std::cerr << "[ge2-title-workaround] skip lui v1, 0 at " << hex32(pc) << "\\n";
+            ++executed;
+            pc += 4u;
+            continue;
+        }
+        if (pc == 0x08B72204u && ge2_title_window && memory.contains(pc - 4u, 16u) &&
+            memory.aot_load32(pc - 4u) == 0x3C030000u &&
+            instruction_word == 0x8C630000u &&
+            memory.aot_load32(pc + 4u) == 0x00002021u &&
+            memory.aot_load32(pc + 8u) == 0xAC400074u) {
+            std::cerr << "[ge2-title-workaround] skip lw v1, 0(v1) at " << hex32(pc) << "\\n";
+            ++executed;
+            pc += 4u;
+            continue;
+        }
+        const DecodedInstruction decoded = decode_allegrex(instruction_word);
         remember_instruction(pc, decoded);
         ++executed;
 
