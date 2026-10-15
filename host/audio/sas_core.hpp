@@ -102,8 +102,11 @@ public:
     // One bit per voice, set while the voice is paused.
     [[nodiscard]] std::uint32_t pause_flag() const noexcept;
     void set_pause(std::uint32_t mask, bool paused);
-    void key_on(std::uint32_t voice);
-    void key_off(std::uint32_t voice);
+    // Match PSP SAS return codes: invalid voice -> 0x80420010; keying on an
+    // already-playing/paused voice, or keying off a paused/inactive voice,
+    // -> 0x80420016.
+    [[nodiscard]] std::uint32_t key_on(std::uint32_t voice);
+    [[nodiscard]] std::uint32_t key_off(std::uint32_t voice);
     // One bit per voice, set while the voice is *not* playing.
     [[nodiscard]] std::uint32_t end_flag() const noexcept;
     [[nodiscard]] std::int32_t envelope_height(std::uint32_t voice) const noexcept;
