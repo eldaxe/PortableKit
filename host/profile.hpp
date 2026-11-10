@@ -296,6 +296,10 @@ struct GameProfile {
     // Where the game caches the glyphs it has drawn. Null: a font changed while
     // the game runs applies to text the game has not drawn yet.
     const GlyphCacheLayout *glyph_cache = nullptr;
+
+    // Optional guest PCs whose interpreter entry registers should be logged.
+    // Intended for narrowly scoped bring-up diagnostics; null disables it.
+    const char *interpreter_watch = nullptr;
 };
 
 // Defined by the port, exactly once. Everything under host/ reads the game
