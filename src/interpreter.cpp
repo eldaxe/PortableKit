@@ -105,8 +105,10 @@ void report_watch(Runtime &runtime, const AllegrexContext &ctx, std::uint32_t pc
     std::cerr << "[watch] " << hex32(pc) << " #" << seen << " v0=" << hex32(ctx.gpr[2])
               << " a0=" << hex32(ctx.gpr[4]) << " a1=" << hex32(ctx.gpr[5])
               << " a2=" << hex32(ctx.gpr[6]) << " a3=" << hex32(ctx.gpr[7])
+              << " sp=" << hex32(ctx.gpr[29])
               << " s0=" << hex32(ctx.gpr[16]) << " s1=" << hex32(ctx.gpr[17])
-              << " s2=" << hex32(ctx.gpr[18]) << " ra=" << hex32(ctx.gpr[31]);
+              << " s2=" << hex32(ctx.gpr[18])
+              << " caller_ra=" << hex32(ctx.gpr[31]);
     // What a0 points at, when it is a pointer to an object: the field that is
     // never what the game waits for is usually visible right here.
     if (g_watch_words != 0u && runtime.memory().contains(ctx.gpr[4], g_watch_words * 4u)) {
