@@ -482,7 +482,8 @@ inline constexpr const char *kBuildLabel = \"${PORTABLEKIT_BUILD_LABEL}\";
         COMMAND ${CMAKE_COMMAND} "-DINPUT=${nids_input}" -DOUTPUT=${nids_inc}
                 -P "${PORTABLEKIT_ROOT}/tools/embed_nids.cmake"
         DEPENDS ${nids_csv} "${PORTABLEKIT_ROOT}/tools/embed_nids.cmake"
-        COMMENT "Embedding the NID table")
+        COMMENT "Embedding the NID table"
+        VERBATIM)
     target_sources(${target} PRIVATE "${nids_inc}")
     target_include_directories(${target} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated_nids")
 
