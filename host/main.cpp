@@ -492,6 +492,22 @@ int main(int argc, char **argv) {
         const psprecomp::Elf32Image elf = psprecomp::Elf32Image::from_file(executable);
         const std::uint32_t load_base = portablekit::game().load_base;
         const std::uint32_t ram_bytes = portablekit::game().guest_ram_bytes;
+
+        // Enable a profile's narrowly scoped interpreter watch without requiring
+        // Android launch-time environment configuration. An explicit process
+        // setting wins; <GAME>_INTERPRETER_WATCH can override the profile default.
+        if (std::getenv("PSPRECOMP_INTERPRETER_WATCH") == nullptr) {
+            const char *watch = portablekit::env("INTERPRETER_WATCH");
+            if (watch == nullptr || *watch == '\\0') watch = portablekit::game().interpreter_watch;
+            if (watch != nullptr && *watch != '\\0') {
+#if defined(_WIN32)
+                _putenv_s("PSPRECOMP_INTERPRETER_WATCH", watch);
+#else
+                setenv("PSPRECOMP_INTERPRETER_WATCH", watch, 0);
+#endif
+                std::cerr << "[diagnostic] interpreter watch at " << watch << "\\n";
+            }
+        }
         if (elf.required_ram_size(load_base) > ram_bytes)
             throw psprecomp::Error("The executable needs more than the " + std::to_string(ram_bytes >> 20) +
                                    " MiB of guest memory this profile declares");
