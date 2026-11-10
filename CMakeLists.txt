@@ -519,3 +519,14 @@ if(PSPRECOMP_BUILD_TESTS)
     set_target_properties(portablekit_keys_file_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
     add_test(NAME portablekit_keys_file_tests COMMAND portablekit_keys_file_tests)
 endif()
+
+
+# ELF/PRX relocation regressions, including stripped PT_PSPREL1 images.
+if(PSPRECOMP_BUILD_TESTS)
+    add_executable(portablekit_elf_relocation_tests
+        "${PORTABLEKIT_ROOT}/tests/elf_relocation_regression_tests.cpp")
+    target_link_libraries(portablekit_elf_relocation_tests PRIVATE psprecomp_core)
+    set_target_properties(portablekit_elf_relocation_tests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME portablekit_elf_relocation_tests COMMAND portablekit_elf_relocation_tests)
+endif()
