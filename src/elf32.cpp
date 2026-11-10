@@ -477,12 +477,27 @@ RelocationStats Elf32Image::apply_relocations(GuestMemory &memory, std::uint32_t
                 throw Error("Invalid PSP REL2 offset-size flag");
             }
 
+            // Consume the optional LO16 payload before validating either segment
+            // or patch address. REL2 is a byte stream: skipping an invalid
+            // relocation without consuming this payload desynchronizes every
+            // subsequent command in the segment.
+            if ((flag & 0x38u) == 0u) {
+                lo16 = 0;
+            } else if ((flag & 0x38u) == 8u) {
+                if (last_type != 4) lo16 = 0;
+            } else if ((flag & 0x38u) == 0x10u) {
+                lo16 = static_cast<std::int16_t>(read_u16());
+            } else {
+                throw Error("Invalid PSP REL2 LO16 encoding");
+            }
+
             if (rel_base < 0 || rel_base > 0x7FFFFFFFll ||
                 address_segment >= segments_.size() ||
                 segments_[address_segment].type != kPtLoad ||
                 off_segment < 0 || static_cast<std::size_t>(off_segment) >= segments_.size() ||
                 segments_[static_cast<std::size_t>(off_segment)].type != kPtLoad) {
                 ++stats.invalid;
+                last_type = static_cast<std::int32_t>(type);
                 continue;
             }
             const std::uint32_t relocate_to = segment_addresses[address_segment];
@@ -512,16 +527,6 @@ RelocationStats Elf32Image::apply_relocations(GuestMemory &memory, std::uint32_t
             // investigation with -DPSPRECOMP_TRACE_REL2=1.
 
             constexpr bool trace_rel2 = PSPRECOMP_TRACE_REL2 != 0;
-
-            if ((flag & 0x38u) == 0u) {
-                lo16 = 0;
-            } else if ((flag & 0x38u) == 8u) {
-                if (last_type != 4) lo16 = 0;
-            } else if ((flag & 0x38u) == 0x10u) {
-                lo16 = static_cast<std::int16_t>(read_u16());
-            } else {
-                throw Error("Invalid PSP REL2 LO16 encoding");
-            }
 
             const std::uint32_t original = memory.load32(patch_address);
             std::uint32_t op = original;
