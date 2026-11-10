@@ -505,8 +505,10 @@ RelocationStats Elf32Image::apply_relocations(GuestMemory &memory, std::uint32_t
                 segment_addresses[static_cast<std::size_t>(off_segment)]) +
                 static_cast<std::uint64_t>(rel_base);
             if (patch64 > 0xFFFFFFFFull ||
+                (patch64 & 3u) != 0u ||
                 !memory.contains(static_cast<std::uint32_t>(patch64), 4u)) {
                 ++stats.invalid;
+                last_type = static_cast<std::int32_t>(type);
                 continue;
             }
             const std::uint32_t patch_address = static_cast<std::uint32_t>(patch64);
