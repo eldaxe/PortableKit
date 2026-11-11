@@ -1042,12 +1042,18 @@ void register_audio(HleRegistrar &hle) {
             kernel().finish(ctx, 0x80420010u);
             return;
         }
+        const std::uint32_t slot = core + 56u * voice + 20u;
+        if (slot < core || !rt.memory().contains(slot, 4u)) {
+            kernel().finish(ctx, 0x80420014u);
+            return;
+        }
+        const std::uint32_t guest_context = rt.memory().load32(slot);
         if (!audio::sas_core(core).unset_atrac3(voice)) {
             kernel().finish(ctx, 0x80420041u);
             return;
         }
-        const std::uint32_t slot = core + 56u * voice + 20u;
-        if (slot >= core && rt.memory().contains(slot, 4u)) rt.memory().store32(slot, 0u);
+        audio::atrac_sas_unbind(rt.memory(), guest_context);
+        rt.memory().store32(slot, 0u);
         kernel().finish(ctx, 0u);
     });
 
