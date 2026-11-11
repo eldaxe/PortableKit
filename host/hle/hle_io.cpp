@@ -1053,6 +1053,28 @@ void register_io(HleRegistrar &hle, const std::filesystem::path &disc_image, con
         kernel().finish(ctx, 0u);
     });
 
+    // SceUmdInfo is { u32 size; u32 type; }. A mounted ISO is a game disc.
+    hle.add("sceUmdUser", "sceUmdGetDiscInfo", [](Runtime &rt, AllegrexContext &ctx) {
+        auto &memory = rt.memory();
+        const std::uint32_t info = arg(ctx, 0);
+        if (info == 0u || !memory.contains(info, 8u)) {
+            kernel().finish(ctx, error::kIllegalAddress);
+            return;
+        }
+        if (memory.load32(info) != 8u) {
+            kernel().finish(ctx, error::kIllegalArgument);
+            return;
+        }
+        memory.store32(info + 4u, io().disc ? 0x10u : 0u);  // PSP_UMD_TYPE_GAME
+        kernel().finish(ctx, 0u);
+    });
+    // The host mounts one immutable image; these calls cannot eject or replace it.
+    hle.add("sceUmdUser", "sceUmdReplaceProhibit", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("sceUmdUser", "sceUmdReplacePermit", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish(ctx, 0u);
+    });
     hle.add("sceUmdUser", "sceUmdActivate", [](Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, 0u); });
     // The disc is never taken away, so letting go of it changes nothing.
     hle.add("sceUmdUser", "sceUmdDeactivate", [](Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, 0u); });
