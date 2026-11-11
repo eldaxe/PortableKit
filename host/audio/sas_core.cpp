@@ -184,7 +184,7 @@ bool SasCore::set_voice_atrac3(
     return true;
 }
 
-bool SasCore::concatenate_atrac3(std::uint32_t voice, const psprecomp::GuestMemory &memory,
+bool SasCore::concatenate_atrac3(std::uint32_t voice, psprecomp::GuestMemory &memory,
                                 std::uint32_t address, std::uint32_t size) {
     if (voice >= kSasMaxVoices) return false;
     SasVoice &v = voices_[voice];
