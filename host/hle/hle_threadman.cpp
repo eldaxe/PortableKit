@@ -330,7 +330,7 @@ void register_semaphores(HleRegistrar &hle) {
             return;
         }
         const SceUID uid = kernel().allocate_uid();
-        kernel().semaphores[uid] = Semaphore{read_cstring(rt.memory(), arg(ctx, 0), 32u), arg(ctx, 1), initial, maximum, {}};
+        kernel().semaphores[uid] = Semaphore{read_cstring(rt.memory(), arg(ctx, 0), 32u), arg(ctx, 1), initial, maximum, {}, initial};
         kernel().finish(ctx, as_unsigned(uid));
     });
     hle.add("ThreadManForUser", "sceKernelDeleteSema", [](Runtime &, AllegrexContext &ctx) {
@@ -548,7 +548,7 @@ void register_event_flags(HleRegistrar &hle) {
 void register_mutexes(HleRegistrar &hle) {
     hle.add("ThreadManForUser", "sceKernelCreateMutex", [](Runtime &rt, AllegrexContext &ctx) {
         const SceUID uid = kernel().allocate_uid();
-        Mutex mutex{read_cstring(rt.memory(), arg(ctx, 0), 32u), arg(ctx, 1), 0, as_signed(arg(ctx, 2)), {}};
+        Mutex mutex{read_cstring(rt.memory(), arg(ctx, 0), 32u), arg(ctx, 1), 0, as_signed(arg(ctx, 2)), {}, as_signed(arg(ctx, 2))};
         if (mutex.lock_count > 0) mutex.owner = kernel().current_uid();
         kernel().mutexes[uid] = std::move(mutex);
         kernel().finish(ctx, as_unsigned(uid));
@@ -749,6 +749,204 @@ void register_callbacks_and_timers(HleRegistrar &hle) {
         found->second.common = arg(ctx, 5);
         kernel().finish(ctx, 0u);
     });
+
+    // Status queries mirror the fixed PSP structure layouts. Only the number
+    // of bytes requested by the guest is written.
+    hle.add("ThreadManForUser", "sceKernelReferSemaStatus", [](Runtime &rt, AllegrexContext &ctx) {
+        const auto found = kernel().semaphores.find(as_signed(arg(ctx, 0)));
+        if (found == kernel().semaphores.end()) {
+            kernel().finish(ctx, error::kUnknownSemid);
+            return;
+        }
+        auto &memory = rt.memory();
+        const std::uint32_t info = arg(ctx, 1);
+        if (info == 0u || !memory.contains(info, 4u)) {
+            kernel().finish(ctx, error::kIllegalAddress);
+            return;
+        }
+        const std::uint32_t size = memory.load32(info);
+        if (size != 0u) {
+            constexpr std::uint32_t kSize = 56u;
+            std::array<std::uint8_t, kSize> bytes{};
+            const auto put = [&bytes](std::uint32_t at, std::uint32_t value) {
+                for (unsigned i = 0; i < 4; ++i) bytes[at + i] = static_cast<std::uint8_t>(value >> (i * 8u));
+            };
+            put(0, kSize);
+            for (std::size_t i = 0; i < found->second.name.size() && i < 31u; ++i)
+                bytes[4u + i] = static_cast<std::uint8_t>(found->second.name[i]);
+            put(36, found->second.attributes);
+            put(40, static_cast<std::uint32_t>(found->second.initial_count));
+            put(44, static_cast<std::uint32_t>(found->second.count));
+            put(48, static_cast<std::uint32_t>(found->second.max_count));
+            put(52, static_cast<std::uint32_t>(found->second.waiters.size()));
+            for (std::uint32_t i = 0; i < std::min(size, kSize); ++i) memory.store8(info + i, bytes[i]);
+        }
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("ThreadManForUser", "sceKernelReferMutexStatus", [](Runtime &rt, AllegrexContext &ctx) {
+        const auto found = kernel().mutexes.find(as_signed(arg(ctx, 0)));
+        if (found == kernel().mutexes.end()) {
+            kernel().finish(ctx, error::kMutexNotFound);
+            return;
+        }
+        auto &memory = rt.memory();
+        const std::uint32_t info = arg(ctx, 1);
+        if (info == 0u || !memory.contains(info, 4u)) {
+            kernel().finish(ctx, error::kIllegalAddress);
+            return;
+        }
+        const std::uint32_t size = memory.load32(info);
+        if (size != 0u) {
+            constexpr std::uint32_t kSize = 56u;
+            std::array<std::uint8_t, kSize> bytes{};
+            const auto put = [&bytes](std::uint32_t at, std::uint32_t value) {
+                for (unsigned i = 0; i < 4; ++i) bytes[at + i] = static_cast<std::uint8_t>(value >> (i * 8u));
+            };
+            put(0, kSize);
+            for (std::size_t i = 0; i < found->second.name.size() && i < 31u; ++i)
+                bytes[4u + i] = static_cast<std::uint8_t>(found->second.name[i]);
+            put(36, found->second.attributes);
+            put(40, static_cast<std::uint32_t>(found->second.initial_count));
+            put(44, static_cast<std::uint32_t>(found->second.lock_count));
+            put(48, as_unsigned(found->second.owner));
+            put(52, static_cast<std::uint32_t>(found->second.waiters.size()));
+            for (std::uint32_t i = 0; i < std::min(size, kSize); ++i) memory.store8(info + i, bytes[i]);
+        }
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("ThreadManForUser", "sceKernelReferLwMutexStatusByID", [](Runtime &rt, AllegrexContext &ctx) {
+        const SceUID uid = as_signed(arg(ctx, 0));
+        auto found = kernel().mutexes.find(uid);
+        if (found == kernel().mutexes.end() ||
+            std::none_of(lwmutex::by_work_area().begin(), lwmutex::by_work_area().end(),
+                         [uid](const auto &entry) { return entry.second == uid; })) {
+            kernel().finish(ctx, error::kMutexNotFound);
+            return;
+        }
+        auto &memory = rt.memory();
+        const std::uint32_t info = arg(ctx, 1);
+        if (info == 0u || !memory.contains(info, 4u)) {
+            kernel().finish(ctx, error::kIllegalAddress);
+            return;
+        }
+        const std::uint32_t size = memory.load32(info);
+        if (size != 0u) {
+            constexpr std::uint32_t kSize = 56u;
+            std::array<std::uint8_t, kSize> bytes{};
+            const auto put = [&bytes](std::uint32_t at, std::uint32_t value) {
+                for (unsigned i = 0; i < 4; ++i) bytes[at + i] = static_cast<std::uint8_t>(value >> (i * 8u));
+            };
+            put(0, kSize);
+            for (std::size_t i = 0; i < found->second.name.size() && i < 31u; ++i)
+                bytes[4u + i] = static_cast<std::uint8_t>(found->second.name[i]);
+            put(36, found->second.attributes);
+            put(40, static_cast<std::uint32_t>(found->second.initial_count));
+            put(44, static_cast<std::uint32_t>(found->second.lock_count));
+            put(48, as_unsigned(found->second.owner));
+            put(52, static_cast<std::uint32_t>(found->second.waiters.size()));
+            for (std::uint32_t i = 0; i < std::min(size, kSize); ++i) memory.store8(info + i, bytes[i]);
+        }
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("ThreadManForUser", "sceKernelReferMbxStatus", [](Runtime &rt, AllegrexContext &ctx) {
+        const auto found = kernel().mailboxes.find(as_signed(arg(ctx, 0)));
+        if (found == kernel().mailboxes.end()) {
+            kernel().finish(ctx, error::kUnknownMbxid);
+            return;
+        }
+        auto &memory = rt.memory();
+        const std::uint32_t info = arg(ctx, 1);
+        if (info == 0u || !memory.contains(info, 4u)) {
+            kernel().finish(ctx, error::kIllegalAddress);
+            return;
+        }
+        const std::uint32_t size = memory.load32(info);
+        if (size != 0u) {
+            constexpr std::uint32_t kSize = 52u;
+            std::array<std::uint8_t, kSize> bytes{};
+            const auto put = [&bytes](std::uint32_t at, std::uint32_t value) {
+                for (unsigned i = 0; i < 4; ++i) bytes[at + i] = static_cast<std::uint8_t>(value >> (i * 8u));
+            };
+            put(0, kSize);
+            for (std::size_t i = 0; i < found->second.name.size() && i < 31u; ++i)
+                bytes[4u + i] = static_cast<std::uint8_t>(found->second.name[i]);
+            put(36, found->second.attributes);
+            put(40, static_cast<std::uint32_t>(found->second.waiters.size()));
+            put(44, static_cast<std::uint32_t>(found->second.messages.size()));
+            // Message packet links are host-side; the guest PSP packet list is
+            // not materialized by this runtime.
+            put(48, 0u);
+            for (std::uint32_t i = 0; i < std::min(size, kSize); ++i) memory.store8(info + i, bytes[i]);
+        }
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("ThreadManForUser", "sceKernelReferCallbackStatus", [](Runtime &rt, AllegrexContext &ctx) {
+        const auto found = kernel().callbacks.find(as_signed(arg(ctx, 0)));
+        if (found == kernel().callbacks.end()) {
+            kernel().finish(ctx, error::kUnknownCbid);
+            return;
+        }
+        auto &memory = rt.memory();
+        const std::uint32_t info = arg(ctx, 1);
+        if (info == 0u || !memory.contains(info, 4u)) {
+            kernel().finish(ctx, error::kIllegalAddress);
+            return;
+        }
+        const std::uint32_t size = memory.load32(info);
+        if (size != 0u) {
+            constexpr std::uint32_t kSize = 56u;
+            std::array<std::uint8_t, kSize> bytes{};
+            const auto put = [&bytes](std::uint32_t at, std::uint32_t value) {
+                for (unsigned i = 0; i < 4; ++i) bytes[at + i] = static_cast<std::uint8_t>(value >> (i * 8u));
+            };
+            put(0, kSize);
+            for (std::size_t i = 0; i < found->second.name.size() && i < 31u; ++i)
+                bytes[4u + i] = static_cast<std::uint8_t>(found->second.name[i]);
+            put(36, as_unsigned(found->second.owner));
+            put(40, found->second.function);
+            put(44, found->second.argument);
+            put(48, found->second.notify_count);
+            put(52, found->second.notify_argument);
+            for (std::uint32_t i = 0; i < std::min(size, kSize); ++i) memory.store8(info + i, bytes[i]);
+        }
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("ThreadManForUser", "sceKernelReferVTimerStatus", [](Runtime &rt, AllegrexContext &ctx) {
+        const auto found = kernel().vtimers.find(as_signed(arg(ctx, 0)));
+        if (found == kernel().vtimers.end()) {
+            kernel().finish(ctx, error::kUnknownVtid);
+            return;
+        }
+        auto &memory = rt.memory();
+        const std::uint32_t info = arg(ctx, 1);
+        if (info == 0u || !memory.contains(info, 4u)) {
+            kernel().finish(ctx, error::kIllegalAddress);
+            return;
+        }
+        const std::uint32_t size = memory.load32(info);
+        if (size != 0u) {
+            constexpr std::uint32_t kSize = 72u;
+            std::array<std::uint8_t, kSize> bytes{};
+            const auto put = [&bytes](std::uint32_t at, std::uint32_t value) {
+                for (unsigned i = 0; i < 4; ++i) bytes[at + i] = static_cast<std::uint8_t>(value >> (i * 8u));
+            };
+            const auto put64 = [&put](std::uint32_t at, std::uint64_t value) {
+                put(at, static_cast<std::uint32_t>(value));
+                put(at + 4u, static_cast<std::uint32_t>(value >> 32u));
+            };
+            put(0, kSize);
+            for (std::size_t i = 0; i < found->second.name.size() && i < 31u; ++i)
+                bytes[4u + i] = static_cast<std::uint8_t>(found->second.name[i]);
+            put(36, found->second.active ? 1u : 0u);
+            put64(40, found->second.base_us);
+            put64(48, kernel().vtimer_value(found->second));
+            put64(56, found->second.schedule_us);
+            put(64, found->second.handler);
+            put(68, found->second.common);
+            for (std::uint32_t i = 0; i < std::min(size, kSize); ++i) memory.store8(info + i, bytes[i]);
+        }
+        kernel().finish(ctx, 0u);
+    });
 }
 
 
@@ -913,7 +1111,7 @@ void register_lightweight_mutexes(HleRegistrar &hle) {
     hle.add("ThreadManForUser", "sceKernelCreateLwMutex", [](Runtime &rt, AllegrexContext &ctx) {
         const std::uint32_t work_area = arg(ctx, 0);
         const SceUID uid = kernel().allocate_uid();
-        Mutex mutex{read_cstring(rt.memory(), arg(ctx, 1), 32u), arg(ctx, 2), 0, as_signed(arg(ctx, 3)), {}};
+        Mutex mutex{read_cstring(rt.memory(), arg(ctx, 1), 32u), arg(ctx, 2), 0, as_signed(arg(ctx, 3)), {}, as_signed(arg(ctx, 3))};
         if (mutex.lock_count > 0) mutex.owner = kernel().current_uid();
         kernel().mutexes[uid] = std::move(mutex);
         lwmutex::by_work_area()[work_area] = uid;
