@@ -60,6 +60,8 @@ inline constexpr std::uint32_t kWaitDelete = 0x800201B5u;
 inline constexpr std::uint32_t kIllegalMemblock = 0x800201B6u;
 inline constexpr std::uint32_t kIllegalCount = 0x800201BDu;
 inline constexpr std::uint32_t kUnknownVtid = 0x800201BEu;
+inline constexpr std::uint32_t kUnknownAlmid = 0x8002019Fu;
+inline constexpr std::uint32_t kIllegalAddress = 0x800200D3u;
 inline constexpr std::uint32_t kMutexNotFound = 0x800201C3u;
 inline constexpr std::uint32_t kMutexLocked = 0x800201C4u;
 inline constexpr std::uint32_t kMutexUnlocked = 0x800201C5u;
@@ -199,6 +201,13 @@ struct VTimer {
     std::uint32_t common{};
 };
 
+struct Alarm {
+    std::uint64_t schedule_us{}; // guest-visible requested deadline
+    std::uint64_t deadline_us{}; // host scheduler deadline (first fire has hardware minimum)
+    std::uint32_t handler{};
+    std::uint32_t common{};
+};
+
 struct MemoryBlock {
     std::string name;
     std::uint32_t address{};
@@ -323,6 +332,7 @@ public:
     std::map<SceUID, Mailbox> mailboxes;
     std::map<SceUID, Callback> callbacks;
     std::map<SceUID, VTimer> vtimers;
+    std::map<SceUID, Alarm> alarms;
     // Re-evaluates the waiters of an object after its state changed.
     void release_semaphore_waiters(SceUID uid);
     void release_event_flag_waiters(SceUID uid);
