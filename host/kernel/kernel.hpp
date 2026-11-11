@@ -150,6 +150,7 @@ struct Semaphore {
     std::int32_t count{};
     std::int32_t max_count{};
     std::deque<SceUID> waiters;
+    std::int32_t initial_count{};
 };
 
 struct EventFlag {
@@ -166,6 +167,7 @@ struct Mutex {
     SceUID owner{};
     std::int32_t lock_count{};
     std::deque<SceUID> waiters;
+    std::int32_t initial_count{};
 };
 
 // A mailbox: a queue of pointers to messages the guest owns.
