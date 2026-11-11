@@ -6,6 +6,7 @@
 
 #include "app_paths.hpp"
 #include "profile.hpp"
+#include "platform/android_jni.hpp"
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
@@ -17,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <unistd.h>
 
 int portablekit_main(int argc, char **argv);
 
@@ -36,14 +38,28 @@ void *run_game(void *argument) {
     return nullptr;
 }
 
-// An app has no terminal: what the program prints goes to <app_name>.log in
-// its internal storage, where `adb shell run-as` and the menu's Save the log
-// reach it; the one before is kept as <app_name>-previous.log.
+// Redirect both C streams to the game's shared-storage log through SAF.
+// Sekhmet's data_application is "Sekhmet", so this resolves to /sdcard/sekhmet/log.txt.
+// No broad MANAGE_EXTERNAL_STORAGE permission is needed; Android remembers the
+// selected directory grant. Keep the private log as a fallback if SAF is denied.
 void redirect_output() {
+    const int log_fd = portablekit::android::open_log_file(portablekit::game().data_application);
+    if (log_fd >= 0) {
+        std::fflush(stdout);
+        std::fflush(stderr);
+        const bool stdout_ok = ::dup2(log_fd, STDOUT_FILENO) >= 0;
+        const bool stderr_ok = ::dup2(log_fd, STDERR_FILENO) >= 0;
+        ::close(log_fd);
+        if (stdout_ok && stderr_ok) {
+            std::setvbuf(stdout, nullptr, _IOLBF, 0);
+            std::setvbuf(stderr, nullptr, _IONBF, 0);
+            return;
+        }
+    }
+
     const char *storage = SDL_GetAndroidInternalStoragePath();
     if (storage == nullptr) return;
     const std::string log = std::string(storage) + "/" + portablekit::game().app_name + ".log";
-    // The previous run's log survives one start, for reporting a crash.
     std::rename(log.c_str(),
                 (std::string(storage) + "/" + portablekit::game().app_name + "-previous.log").c_str());
     if (std::freopen(log.c_str(), "w", stdout) != nullptr) std::setvbuf(stdout, nullptr, _IOLBF, 0);
