@@ -1013,11 +1013,20 @@ bool atrac_sas_bind(psprecomp::GuestMemory &memory, std::uint32_t guest_context)
     for (auto &entry : contexts()) {
         if (!entry || entry->guest_context_address != guest_context || !entry->loaded) continue;
         entry->sas_bound = true;
-        entry->loop_num = 0;
         sync_guest_context(memory, *entry);
         return true;
     }
     return false;
+}
+
+void atrac_sas_unbind(psprecomp::GuestMemory &memory, std::uint32_t guest_context) {
+    for (auto &entry : contexts()) {
+        if (!entry || entry->guest_context_address != guest_context) continue;
+        entry->sas_bound = false;
+        entry->sas_needs_data = false;
+        sync_guest_context(memory, *entry);
+        return;
+    }
 }
 
 int atrac_sas_read(psprecomp::GuestMemory &memory, std::uint32_t guest_context,
@@ -1041,6 +1050,8 @@ int atrac_sas_read(psprecomp::GuestMemory &memory, std::uint32_t guest_context,
             sync_guest_context(memory, *context);
             return -1;
         }
+        context->sas_needs_data = false;
+        sync_guest_context(memory, *context);
         return context->streaming ? 0 : 1;
     }
     const std::size_t sample_index = static_cast<std::size_t>(first) * 2u;
