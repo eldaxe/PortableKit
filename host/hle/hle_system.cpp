@@ -16,6 +16,7 @@
 #include <vector>
 #include <chrono>
 #include <cstring>
+#include <cstdio>
 #include <ctime>
 #include <iostream>
 #include <map>
@@ -794,11 +795,96 @@ void register_rtc_calendar(HleRegistrar &hle) {
     hle.add("sceRtc", "sceRtcTickAddHours", add_ticks("sceRtcTickAddHours", 3600u * rtc::kTicksPerSecond, false));
     hle.add("sceRtc", "sceRtcTickAddDays", add_ticks("sceRtcTickAddDays", rtc::kTicksPerDay, false));
     hle.add("sceRtc", "sceRtcTickAddWeeks", add_ticks("sceRtcTickAddWeeks", 7u * rtc::kTicksPerDay, false));
+    // Convert a UTC tick to the host's local timezone. The offset is evaluated
+    // for the represented instant so daylight-saving transitions are respected.
+    const auto local_offset_seconds = [](std::uint64_t tick) -> std::int64_t {
+        constexpr std::uint64_t epoch = rtc::kUnixEpochTick;
+        const std::int64_t unix_seconds = tick >= epoch
+            ? static_cast<std::int64_t>((tick - epoch) / rtc::kTicksPerSecond)
+            : -static_cast<std::int64_t>((epoch - tick) / rtc::kTicksPerSecond);
+        const std::time_t instant = static_cast<std::time_t>(unix_seconds);
+        const std::tm *local_ptr = std::localtime(&instant);
+        const std::tm *utc_ptr = std::gmtime(&instant);
+        if (local_ptr == nullptr || utc_ptr == nullptr) return 0;
+        std::tm local_copy = *local_ptr;
+        std::tm utc_copy = *utc_ptr;
+        const std::time_t local_as_utc = std::mktime(&local_copy);
+        const std::time_t utc_as_local = std::mktime(&utc_copy);
+        return static_cast<std::int64_t>(std::difftime(local_as_utc, utc_as_local));
+    };
+    hle.add("sceRtc", "sceRtcConvertUtcToLocalTime", [local_offset_seconds](Runtime &rt, AllegrexContext &ctx) {
+        auto &memory = rt.memory();
+        const std::uint32_t source = arg(ctx, 0);
+        const std::uint32_t destination = arg(ctx, 1);
+        if (source == 0u || destination == 0u || !memory.contains(source, 8u) ||
+            !memory.contains(destination, 8u)) {
+            kernel().finish(ctx, 1u);
+            return;
+        }
+        const std::uint64_t utc_tick = static_cast<std::uint64_t>(memory.load32(source)) |
+                                       (static_cast<std::uint64_t>(memory.load32(source + 4u)) << 32u);
+        const std::int64_t offset = local_offset_seconds(utc_tick) *
+                                    static_cast<std::int64_t>(rtc::kTicksPerSecond);
+        const std::int64_t local_tick = static_cast<std::int64_t>(utc_tick) + offset;
+        if (local_tick < 0) {
+            kernel().finish(ctx, 1u);
+            return;
+        }
+        store64(memory, destination, static_cast<std::uint64_t>(local_tick));
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("sceRtc", "sceRtcFormatRFC3339LocalTime", [local_offset_seconds](Runtime &rt, AllegrexContext &ctx) {
+        auto &memory = rt.memory();
+        const std::uint32_t output = arg(ctx, 0);
+        const std::uint32_t source = arg(ctx, 1);
+        if (output == 0u || source == 0u || !memory.contains(output, 32u) ||
+            !memory.contains(source, 8u)) {
+            kernel().finish(ctx, 0xFFFFFFFFu);
+            return;
+        }
+        const std::uint64_t utc_tick = static_cast<std::uint64_t>(memory.load32(source)) |
+                                       (static_cast<std::uint64_t>(memory.load32(source + 4u)) << 32u);
+        const std::int64_t offset_seconds = local_offset_seconds(utc_tick);
+        const std::int64_t local_tick = static_cast<std::int64_t>(utc_tick) +
+                                        offset_seconds * static_cast<std::int64_t>(rtc::kTicksPerSecond);
+        if (local_tick < 0) {
+            kernel().finish(ctx, 0xFFFFFFFFu);
+            return;
+        }
+        const rtc::DateTime date = rtc::from_tick(static_cast<std::uint64_t>(local_tick));
+        const std::int64_t absolute_offset = offset_seconds < 0 ? -offset_seconds : offset_seconds;
+        const char sign = offset_seconds < 0 ? '-' : '+';
+        char formatted[32]{};
+        std::snprintf(formatted, sizeof(formatted), "%04d-%02d-%02dT%02d:%02d:%02d.00%c%02lld:%02lld",
+                      date.year, date.month, date.day, date.hour, date.minute, date.second, sign,
+                      static_cast<long long>(absolute_offset / 3600),
+                      static_cast<long long>((absolute_offset / 60) % 60));
+        write_cstring(memory, output, formatted, sizeof(formatted));
+        kernel().finish(ctx, 0u);
+    });
+    // The PSP RTC alarm is not wired to a host power controller. PPSSPP and
+    // JPCSP treat setting it as a successful no-op; the paired IsAlarmed
+    // operation consequently remains false.
+    hle.add("sceRtc", "sceRtcSetAlarmTick", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish(ctx, 0u);
+    });
 }
 
 void register_system(HleRegistrar &hle) {
     register_md5(hle);
     register_utils(hle);
+    // A native Android host does not expose a PSP battery controller. Report
+    // the stable AC-powered state used by PPSSPP: full charge and no remaining
+    // battery countdown; a suspend request must not suspend the Android host.
+    hle.add("scePower", "scePowerGetBatteryLifePercent", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish(ctx, 100u);
+    });
+    hle.add("scePower", "scePowerGetBatteryLifeTime", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("scePower", "scePowerRequestSuspend", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish(ctx, 0u);
+    });
     register_process(hle);
     register_interrupts(hle);
     register_platform(hle);
