@@ -673,9 +673,12 @@ void register_callbacks_and_timers(HleRegistrar &hle) {
             return;
         }
         const SceUID uid = kernel().allocate_uid();
-        const std::uint64_t requested = kernel().now_us() + delay_us;
-        const std::uint64_t first_delay = std::max<std::uint64_t>(delay_us, 215u);
-        kernel().alarms[uid] = Alarm{requested, kernel().now_us() + first_delay, handler, arg(ctx, 2)};
+        constexpr std::uint64_t kMaximumAlarmDelay = std::uint64_t{1} << 52u;
+        const std::uint64_t now = kernel().now_us();
+        const std::uint64_t requested = now + std::min(delay_us, kMaximumAlarmDelay);
+        const std::uint64_t first_delay = std::max<std::uint64_t>(
+            std::min(delay_us, kMaximumAlarmDelay), 215u);
+        kernel().alarms[uid] = Alarm{requested, now + first_delay, handler, arg(ctx, 2)};
         kernel().finish(ctx, as_unsigned(uid));
     };
     hle.add("ThreadManForUser", "sceKernelSetAlarm", [set_alarm](Runtime &rt, AllegrexContext &ctx) {
