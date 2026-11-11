@@ -15,6 +15,7 @@
 #include "hle_common.hpp"
 
 #include "audio/atrac_decoder.hpp"
+#include "audio/sas_core.hpp"
 
 #include "psprecomp/common.hpp"
 
@@ -116,8 +117,15 @@ struct AtracContext {
     // game feeds the decoder itself: their size and the channels it wants.
     std::uint32_t codec_type{0x1000u};
     bool low_level{};
+    bool sas_bound{};
+    bool sas_needs_data{};
     std::uint32_t low_level_frame_bytes{};
     std::uint32_t low_level_out_channels{2u};
+
+    // The guest-visible 256-byte SceAtracContext returned by
+    // _sceAtracGetContextAddress. Host decoder state remains in this object.
+    std::int32_t guest_context_uid{-1};
+    std::uint32_t guest_context_address{};
 };
 
 std::array<std::unique_ptr<AtracContext>, kMaxAtracIds> &contexts() {
@@ -236,6 +244,19 @@ std::uint64_t play_order(const AtracContext &context, std::uint32_t offset, std:
     return offset + static_cast<std::uint64_t>(passes) * loop_bytes;
 }
 
+bool frame_available(const psprecomp::GuestMemory &memory, const AtracContext &context, std::int64_t frame) {
+    if (frame < 0) return false;
+    const std::uint64_t offset = context.track.data_offset +
+        static_cast<std::uint64_t>(frame) * context.track.block_align;
+    const std::uint64_t end = offset + context.track.block_align;
+    if (context.streaming) {
+        return offset >= context.stored_from &&
+               end <= static_cast<std::uint64_t>(context.stored_from) + context.stored.size();
+    }
+    return end <= std::min(context.buffer_size, context.track.data_offset + context.track.data_size) &&
+           memory.contains(context.buffer + static_cast<std::uint32_t>(offset), context.track.block_align);
+}
+
 // Decodes stream frame `frame` into the cache, reseeding the decoder when the
 // request is not the frame that follows the last one it decoded.
 bool load_frame(const psprecomp::GuestMemory &memory, AtracContext &context, std::int64_t frame) {
@@ -267,14 +288,84 @@ bool load_frame(const psprecomp::GuestMemory &memory, AtracContext &context, std
             (void)decode(warm_up);
     }
     const bool decoded = decode(frame);
+    if (!decoded && context.streaming) {
+        // A SAS voice can underrun before the game enqueues the next packet.
+        // Do not cache silence: retry this exact frame after concatenation.
+        context.next_frame = -1;
+        context.cached_frame = -1;
+        return false;
+    }
     if (!decoded) std::fill(context.cached.begin(), context.cached.end(), std::int16_t{0});
     context.next_frame = frame + 1;
     context.cached_frame = frame;
     return decoded;
 }
 
+// Defined below with the streaming position helpers.
+std::uint32_t current_frame_offset(const AtracContext &context);
+std::uint32_t ring_frames(const AtracContext &context);
+
+// SceAtracContext is 128 bytes of codec state followed by the 128-byte
+// SceAtracIdInfo. Keep the guest-visible fields in sync without exposing the
+// host FFmpeg decoder or its private state.
+void sync_guest_context(psprecomp::GuestMemory &memory, AtracContext &context) {
+    const std::uint32_t base = context.guest_context_address;
+    if (base == 0u || !memory.contains(base, 256u) || !context.loaded) return;
+    const TrackInfo &track = context.track;
+    const std::uint32_t info = base + 128u;
+    const auto put32 = [&](std::uint32_t offset, std::uint32_t value) { memory.store32(info + offset, value); };
+    put32(0u, static_cast<std::uint32_t>(context.position) + track.skip); // decodePos
+    put32(4u, static_cast<std::uint32_t>(track.end_sample) + track.skip); // endSample
+    put32(8u, track.loop_start < 0 ? 0u : static_cast<std::uint32_t>(track.loop_start) + track.skip); // loopStart
+    put32(12u, track.loop_end < 0 ? 0u : static_cast<std::uint32_t>(track.loop_end) + track.skip); // loopEnd
+    put32(16u, track.skip);                                        // firstValidSample
+    memory.store8(info + 20u, 0u);                                 // numSkipFrames
+    memory.store8(info + 21u, static_cast<std::uint8_t>(context.sas_bound ? 16u : (context.low_level ? 8u :
+                   (context.streaming ? (context.buffer_size >= track.file_size ? 3u : 4u) : 2u)))); // state
+    memory.store8(info + 22u, 0u);                                 // curBuffer
+    memory.store8(info + 23u, static_cast<std::uint8_t>(track.channels)); // numChan
+    memory.store16(info + 24u, static_cast<std::uint16_t>(track.block_align)); // sampleSize
+    memory.store16(info + 26u, context.codec_type == 0x1001u ? 0x1001u :
+                   (track.codec == audio::AtracCodec::Atrac3 ? 0x1001u : 0x1000u)); // codec
+    put32(28u, track.data_offset);                                 // dataOff
+    put32(32u, current_frame_offset(context));                     // curFileOff
+    put32(36u, track.file_size);                                   // fileDataEnd
+    put32(40u, static_cast<std::uint32_t>(context.loop_num));      // loopNum
+    put32(44u, context.written > track.data_offset ? context.written - track.data_offset : 0u); // streamDataByte
+    const std::uint32_t ring_bytes = ring_frames(context) * track.block_align;
+    put32(48u, context.streaming && ring_bytes != 0u ?
+           (current_frame_offset(context) - track.data_offset) % ring_bytes : 0u); // streamOff
+    put32(52u, 0u);                                                 // secondStreamOff
+    put32(56u, context.buffer);                                    // buffer
+    put32(60u, context.sas_needs_data ? 0xFFFFFFFFu : 0u);          // secondBuffer SAS refill handshake
+    put32(64u, context.buffer_size);                               // bufferByte
+    put32(68u, 0u);                                                 // secondBufferByte
+}
+
+bool ensure_guest_context(psprecomp::GuestMemory &memory, AtracContext &context) {
+    if (context.guest_context_address != 0u && memory.contains(context.guest_context_address, 256u)) {
+        sync_guest_context(memory, context);
+        return true;
+    }
+    const std::int32_t uid = kernel().allocate_block("ATRAC context", 4u, 256u, 16u);
+    if (uid < 0) return false;
+    const MemoryBlock *block = kernel().find_block(uid);
+    if (block == nullptr || !memory.contains(block->address, 256u)) {
+        (void)kernel().free_block(uid);
+        return false;
+    }
+    context.guest_context_uid = uid;
+    context.guest_context_address = block->address;
+    for (std::uint32_t i = 0; i < 256u; ++i) memory.store8(block->address + i, 0u);
+    sync_guest_context(memory, context);
+    return true;
+}
+
 void release_context(std::uint32_t id) {
-    if (id < kMaxAtracIds) contexts()[id].reset();
+    if (id >= kMaxAtracIds || !contexts()[id]) return;
+    if (contexts()[id]->guest_context_uid >= 0)
+        (void)kernel().free_block(contexts()[id]->guest_context_uid);
+    contexts()[id].reset();
 }
 
 // The file offset of the frame the next DecodeData starts in.
@@ -413,7 +504,7 @@ struct LoadResult {
 // Reads the header, opens the decoder and puts the track in slot `id`, or in
 // the first free one. `streaming`: only `read_size` bytes of the file are in
 // the buffer yet; otherwise all of it that ever will be.
-LoadResult load_track(const psprecomp::GuestMemory &memory, std::optional<std::uint32_t> id, std::uint32_t buffer,
+LoadResult load_track(psprecomp::GuestMemory &memory, std::optional<std::uint32_t> id, std::uint32_t buffer,
                       std::uint32_t read_size, std::uint32_t buffer_size, bool streaming) {
     auto context = std::make_unique<AtracContext>();
     if (read_size > buffer_size) return {atrac_error::kSizeTooSmall, "read size past the buffer"};
@@ -444,7 +535,13 @@ LoadResult load_track(const psprecomp::GuestMemory &memory, std::optional<std::u
             << " end=" << track.end_sample << " loop=" << track.loop_start << ".." << track.loop_end
             << " skip=" << track.skip;
     if (streaming) details << " streamed, " << read_size << " of it in a buffer of " << buffer_size;
+    if (id && table[slot]) {
+        context->guest_context_uid = table[slot]->guest_context_uid;
+        context->guest_context_address = table[slot]->guest_context_address;
+        table[slot].reset();
+    }
     table[slot] = std::move(context);
+    sync_guest_context(memory, *table[slot]);
     return {slot, details.str()};
 }
 
@@ -473,6 +570,19 @@ void register_atrac_functions(HleRegistrar &hle) {
         (*slot)->codec_type = arg(ctx, 0);
         finish_traced(ctx, "sceAtracGetAtracID", static_cast<std::uint32_t>(slot - table.begin()));
     });
+    // _sceAtracGetContextAddress(id): return the guest-visible 256-byte
+    // SceAtracContext consumed by the sceSasCore ATRAC voice functions.
+    hle.try_add("sceAtrac3plus", "_sceAtracGetContextAddress", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t id = arg(ctx, 0);
+        AtracContext *context = find_context(id);
+        if (context == nullptr || !ensure_guest_context(rt.memory(), *context)) {
+            finish_traced(ctx, "_sceAtracGetContextAddress",
+                          context == nullptr ? context_error(id) : atrac_error::kNoAtracId);
+            return;
+        }
+        finish_traced(ctx, "_sceAtracGetContextAddress", context->guest_context_address);
+    });
+
     // sceAtracSetData(id, buffer, bufferSize): SetDataAndGetID for an id
     // already handed out.
     hle.add("sceAtrac3plus", "sceAtracSetData", [](Runtime &rt, AllegrexContext &ctx) {
@@ -907,6 +1017,101 @@ void register_atrac_functions(HleRegistrar &hle) {
 }
 
 } // namespace
+
+// The SAS mixer refers to an ATRAC context by the guest address returned from
+// _sceAtracGetContextAddress. These functions keep the decoder owned by the
+// ATRAC HLE and expose only the operations the SAS voice needs.
+namespace audio {
+bool atrac_sas_bind(psprecomp::GuestMemory &memory, std::uint32_t guest_context) {
+    for (auto &entry : contexts()) {
+        if (!entry || entry->guest_context_address != guest_context || !entry->loaded) continue;
+        entry->sas_bound = true;
+        sync_guest_context(memory, *entry);
+        return true;
+    }
+    return false;
+}
+
+void atrac_sas_unbind(psprecomp::GuestMemory &memory, std::uint32_t guest_context) {
+    for (auto &entry : contexts()) {
+        if (!entry || entry->guest_context_address != guest_context) continue;
+        entry->sas_bound = false;
+        entry->sas_needs_data = false;
+        sync_guest_context(memory, *entry);
+        return;
+    }
+}
+
+int atrac_sas_read(psprecomp::GuestMemory &memory, std::uint32_t guest_context,
+                   std::int16_t &left, std::int16_t &right) {
+    AtracContext *context = nullptr;
+    for (auto &entry : contexts())
+        if (entry && entry->guest_context_address == guest_context) { context = entry.get(); break; }
+    if (context == nullptr || !context->loaded) return 0;
+    TrackInfo &track = context->track;
+    if (context->position > track.end_sample) return 0;
+
+    const bool loops = looping(*context) && context->position <= track.loop_end;
+    const std::int32_t stop = loops ? track.loop_end : track.end_sample;
+    const std::int64_t frame_samples = static_cast<std::int64_t>(atrac_frame_samples(track.codec));
+    const std::int64_t decoded_index = static_cast<std::int64_t>(context->position) + track.skip;
+    const std::int64_t frame = decoded_index / frame_samples;
+    const std::int64_t first = decoded_index % frame_samples;
+    if (!load_frame(memory, *context, frame)) {
+        const bool missing = !frame_available(memory, *context, frame);
+        if (context->streaming && missing && context->cursor < track.file_size) {
+            context->sas_needs_data = true;
+            sync_guest_context(memory, *context);
+            return -1;
+        }
+        // Encoded bytes are present but the decoder rejected them: stop the
+        // SAS source rather than turning a codec failure into endless silence.
+        context->sas_needs_data = false;
+        sync_guest_context(memory, *context);
+        return 0;
+    }
+    const std::size_t sample_index = static_cast<std::size_t>(first) * 2u;
+    // sceAtrac's SAS handoff switches its output to one channel; SAS
+    // applies the per-voice left/right volume after decoding.
+    const std::int32_t mono = (static_cast<std::int32_t>(context->cached[sample_index]) +
+                              static_cast<std::int32_t>(context->cached[sample_index + 1u])) / 2;
+    left = right = static_cast<std::int16_t>(mono);
+
+    ++context->position;
+    if (context->position > stop && loops) {
+        context->position = track.loop_start;
+        ++context->loops_done;
+        if (context->loop_num > 0) --context->loop_num;
+    }
+    if (context->streaming) {
+        trim_stored(*context);
+        // Request the next chunk before the SAS reader actually underruns.
+        // Two encoded frames leave room for the game to service the request.
+        if (context->cursor < track.file_size && remain_frames(*context) <= 2)
+            context->sas_needs_data = true;
+    }
+    sync_guest_context(memory, *context);
+    return 1;
+}
+
+bool atrac_sas_enqueue(psprecomp::GuestMemory &memory, std::uint32_t guest_context,
+                       std::uint32_t address, std::uint32_t size) {
+    for (auto &entry : contexts()) {
+        if (!entry || entry->guest_context_address != guest_context) continue;
+        AtracContext &context = *entry;
+        if (!context.loaded) return false;
+        if (size == 0u || !context.streaming || context.cursor >= context.track.file_size)
+            return true; // no-op or the complete file is already resident
+        const std::uint32_t accepted = std::min(size, context.track.file_size - context.cursor);
+        if (!memory.contains(address, accepted)) return false;
+        store_added(memory, context, address, accepted);
+        context.sas_needs_data = false;
+        sync_guest_context(memory, context);
+        return true;
+    }
+    return false;
+}
+} // namespace audio
 
 void register_atrac(HleRegistrar &hle) {
     if (!audio::AtracDecoder::available()) {

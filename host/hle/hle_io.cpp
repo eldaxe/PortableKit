@@ -328,6 +328,14 @@ std::size_t read_open_file(std::uint32_t fd, std::uint64_t offset, std::uint8_t 
     return 0u;
 }
 
+std::optional<std::uint64_t> open_file_size(std::uint32_t fd) {
+    const auto found = io().files.find(fd);
+    if (found == io().files.end()) return std::nullopt;
+    const OpenFile &file = found->second;
+    if (file.kind != OpenFile::Kind::Disc && file.kind != OpenFile::Kind::Host) return std::nullopt;
+    return file.size;
+}
+
 bool set_open_file_filter(std::uint32_t fd, std::shared_ptr<hle_extension::FileFilter> filter) {
     const auto found = io().files.find(fd);
     if (found == io().files.end()) return false;

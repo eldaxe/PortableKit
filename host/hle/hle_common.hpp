@@ -8,6 +8,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
@@ -59,6 +60,8 @@ private:
 // Reads from an open guest file descriptor without moving its position.
 // Returns the number of bytes read; 0 when the descriptor is unknown.
 std::size_t read_open_file(std::uint32_t fd, std::uint64_t offset, std::uint8_t *output, std::size_t size);
+// Size of an open regular file, after any active read filter; null for an invalid handle or directory.
+[[nodiscard]] std::optional<std::uint64_t> open_file_size(std::uint32_t fd);
 namespace hle_extension {
 class FileFilter;
 }
