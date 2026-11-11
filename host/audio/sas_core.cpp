@@ -201,7 +201,10 @@ bool SasCore::concatenate_atrac3(std::uint32_t voice, psprecomp::GuestMemory &me
                                 std::uint32_t address, std::uint32_t size) {
     if (voice >= kSasMaxVoices) return false;
     SasVoice &v = voices_[voice];
-    return v.atrac3 && v.atrac_enqueue && v.atrac_enqueue(memory, address, size);
+    if (!v.atrac3 || !v.atrac_enqueue || !v.atrac_enqueue(memory, address, size)) return false;
+    v.source_waiting = false;
+    v.source_ended = false;
+    return true;
 }
 
 bool SasCore::unset_atrac3(std::uint32_t voice) {
@@ -466,6 +469,11 @@ void SasCore::advance_source(psprecomp::GuestMemory &memory, SasVoice &voice) {
     voice.previous = voice.current;
     voice.previous_right = voice.current_right;
     if (voice.atrac3) {
+        if (voice.source_waiting) {
+            voice.previous = voice.current = 0;
+            voice.previous_right = voice.current_right = 0;
+            return;
+        }
         if (!voice.atrac_read) { voice.source_ended = true; return; }
         std::int16_t left = 0, right = 0;
         const int result = voice.atrac_read(memory, left, right);
