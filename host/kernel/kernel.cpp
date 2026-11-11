@@ -622,6 +622,7 @@ void Kernel::process_timers() {
         call.function = alarm.handler;
         call.arguments = {alarm.common, 0u, 0u, 0u};
         call.argument_count = 1u;
+        call.is_valid = [alarm_uid] { return kernel().alarms.contains(alarm_uid); };
         // PSP alarm handlers return a positive microsecond delay to repeat.
         // A zero/negative result ends the alarm. Rescheduling is based on the
         // previous scheduled time unless that deadline is already in the past.
@@ -1024,9 +1025,13 @@ void Kernel::on_vblank() {
 }
 
 bool Kernel::begin_pending_interrupt(AllegrexContext &ctx) {
-    if (pending_interrupts_.empty()) return false;
-    InterruptCall call = std::move(pending_interrupts_.front());
-    pending_interrupts_.pop_front();
+    InterruptCall call{};
+    while (!pending_interrupts_.empty()) {
+        call = std::move(pending_interrupts_.front());
+        pending_interrupts_.pop_front();
+        if (!call.is_valid || call.is_valid()) break;
+    }
+    if (call.function == 0u) return false;
     interrupt_active_ = true;
     interrupt_on_return_ = std::move(call.on_return);
     ctx = pristine_context_;
