@@ -132,6 +132,9 @@ void SasCore::set_voice(std::uint32_t voice, std::uint32_t address, std::uint32_
     v.looping = looping;
     v.pcm = false;
     v.noise = false;
+    v.atrac3 = false;
+    v.atrac_read = {};
+    v.atrac_enqueue = {};
     v.loop_block = 0u;
     v.source_ended = address == 0u || v.size < 16u;
 }
@@ -144,8 +147,42 @@ void SasCore::set_voice_pcm(std::uint32_t voice, std::uint32_t address, std::uin
     v.looping = loop >= 0;
     v.pcm = true;
     v.noise = false;
+    v.atrac3 = false;
+    v.atrac_read = {};
+    v.atrac_enqueue = {};
     v.loop_block = 0u;
     v.source_ended = address == 0u || size < 2u;
+}
+
+bool SasCore::set_voice_atrac3(
+    std::uint32_t voice,
+    std::function<int(const psprecomp::GuestMemory &, std::int16_t &, std::int16_t &)> reader,
+    std::function<bool(const psprecomp::GuestMemory &, std::uint32_t, std::uint32_t)> enqueue) {
+    if (voice >= kSasMaxVoices || !reader) return false;
+    SasVoice &v = voices_[voice];
+    v = {};
+    v.atrac3 = true;
+    v.atrac_read = std::move(reader);
+    v.atrac_enqueue = std::move(enqueue);
+    v.index = 28;
+    v.pitch = 0x1000u;
+    v.left = v.right = 0x1000;
+    v.source_ended = false;
+    return true;
+}
+
+bool SasCore::concatenate_atrac3(std::uint32_t voice, const psprecomp::GuestMemory &memory,
+                                std::uint32_t address, std::uint32_t size) {
+    if (voice >= kSasMaxVoices) return false;
+    SasVoice &v = voices_[voice];
+    return v.atrac3 && v.atrac_enqueue && v.atrac_enqueue(memory, address, size);
+}
+
+bool SasCore::unset_atrac3(std::uint32_t voice) {
+    if (voice >= kSasMaxVoices || !voices_[voice].atrac3) return false;
+    voices_[voice] = {};
+    voices_[voice].index = 28;
+    return true;
 }
 
 void SasCore::set_noise(std::uint32_t voice, std::uint32_t clock) {
@@ -153,6 +190,9 @@ void SasCore::set_noise(std::uint32_t voice, std::uint32_t clock) {
     SasVoice &v = voices_[voice];
     v.noise = true;
     v.pcm = false;
+    v.atrac3 = false;
+    v.atrac_read = {};
+    v.atrac_enqueue = {};
     v.noise_clock = clock & 0x3Fu;
     v.source_ended = false;
 }
@@ -280,7 +320,10 @@ void SasCore::key_on(std::uint32_t voice) {
     v.history2 = 0;
     v.previous = 0;
     v.current = 0;
-    v.source_ended = !v.noise && (v.address == 0u || v.size < (v.pcm ? 2u : 16u));
+    v.previous_right = 0;
+    v.current_right = 0;
+    v.source_waiting = false;
+    v.source_ended = !v.noise && !v.atrac3 && (v.address == 0u || v.size < (v.pcm ? 2u : 16u));
     v.noise_timer = 0;
     v.primed = false;
     v.paused = false;
@@ -381,6 +424,25 @@ void SasCore::decode_block(const psprecomp::GuestMemory &memory, SasVoice &voice
 
 void SasCore::advance_source(const psprecomp::GuestMemory &memory, SasVoice &voice) {
     voice.previous = voice.current;
+    voice.previous_right = voice.current_right;
+    if (voice.atrac3) {
+        if (!voice.atrac_read) { voice.source_ended = true; return; }
+        std::int16_t left = 0, right = 0;
+        const int result = voice.atrac_read(memory, left, right);
+        if (result > 0) {
+            voice.current = left;
+            voice.current_right = right;
+            voice.source_waiting = false;
+        } else if (result == 0) {
+            voice.current = voice.current_right = 0;
+            voice.source_ended = true;
+            voice.source_waiting = false;
+        } else {
+            voice.current = voice.current_right = 0;
+            voice.source_waiting = true;
+        }
+        return;
+    }
     if (voice.pcm) {
         const std::uint32_t offset = voice.block;
         if (offset + 2u > voice.size) {
@@ -556,17 +618,23 @@ void SasCore::render(const psprecomp::GuestMemory &memory, std::int16_t *output,
 
         for (std::size_t frame = 0; frame < frames; ++frame) {
             std::int32_t sample = 0;
+            std::int32_t sample_right = 0;
             if (voice.noise) {
                 sample = noise_sample(voice);
             } else {
                 const std::int32_t span = voice.current - voice.previous;
                 sample = voice.previous + ((span * static_cast<std::int32_t>(voice.phase)) >> 12);
+                if (voice.atrac3) {
+                    const std::int32_t right_span = voice.current_right - voice.previous_right;
+                    sample_right = voice.previous_right + ((right_span * static_cast<std::int32_t>(voice.phase)) >> 12);
+                } else sample_right = sample;
             }
             step_envelope(voice);
             const std::int32_t scaled = (sample * voice.envelope) >> 15;
+            const std::int32_t scaled_right = (sample_right * voice.envelope) >> 15;
             const std::size_t slot = frame * 2u;
             mix_[slot] += (scaled * voice.left) >> 12;
-            mix_[slot + 1u] += (scaled * voice.right) >> 12;
+            mix_[slot + 1u] += (scaled_right * voice.right) >> 12;
             if (clamp_each) {
                 mix_[slot] = clamp16(mix_[slot]);
                 mix_[slot + 1u] = clamp16(mix_[slot + 1u]);
