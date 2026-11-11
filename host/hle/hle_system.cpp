@@ -251,6 +251,11 @@ void register_utils(HleRegistrar &hle) {
                              "sceKernelDcacheInvalidateRange", "sceKernelDcacheWritebackRange",
                              "sceKernelDcacheWritebackInvalidateRange", "sceKernelSetGPO"})
         hle.add("UtilsForUser", name, success);
+    // Production PSP systems report all GPI switches as zero. Developer
+    // hardware can expose physical switch bits, which this runtime does not.
+    hle.add("UtilsForUser", "sceKernelGetGPI", [](Runtime &, AllegrexContext &ctx) {
+        kernel().finish(ctx, 0u);
+    });
     // The guest flushes the instruction cache after copying code into an overlay
     // slot, which is the profile's cue to re-check which overlay is loaded.
     const auto flush_icache = [](Runtime &rt, AllegrexContext &ctx) {
