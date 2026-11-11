@@ -587,3 +587,13 @@ ModuleMgrForUser,0x644395E2,sceKernelGetModuleIdList
 ModuleMgrForUser,0x748CBED9,sceKernelQueryModuleInfo
 scePspNpDrm_user,0x275987D1,sceNpDrmRenameCheck
 scePspNpDrm_user,0x219EF5CC,sceNpDrmEdataGetDataSize
+
+sceUmdUser,0x340B7686,sceUmdGetDiscInfo
+sceUmdUser,0x87533940,sceUmdReplaceProhibit
+sceUmdUser,0xCBE9F02A,sceUmdReplacePermit
+scePower,0x2085D15D,scePowerGetBatteryLifePercent
+scePower,0x8EFB3FA2,scePowerGetBatteryLifeTime
+scePower,0xAC32C9CC,scePowerRequestSuspend
+sceRtc,0x27F98543,sceRtcFormatRFC3339LocalTime
+sceRtc,0x34885E0D,sceRtcConvertUtcToLocalTime
+sceRtc,0x7D1FBED3,sceRtcSetAlarmTick
