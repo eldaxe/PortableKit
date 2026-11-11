@@ -75,7 +75,7 @@ Static code iterates the network-module table in reverse order (`0x101`, then `0
 
 ## Recommended next action
 
-Do not implement a general PRX loader yet. Add optional tracing around the two existing utility module handlers (module ID, load/unload, return value), then run the game and compare actual requests with this static list. If the game fails at one of these calls, implement only the missing module-state/dependency behavior. Keep the current HLE API implementations as the execution backend unless a concrete guest PRX is proven necessary.
+Do not implement a general PRX loader yet. Optional tracing has now been added around the utility module handlers. Set `TRACE_UTILITY_MODULES=1` to log each load/unload operation, module ID, and the HLE-backed success result. Run the game and compare actual requests with this static list. If the game fails at one of these calls, implement only the missing module-state/dependency behavior. Keep the current HLE API implementations as the execution backend unless a concrete guest PRX is proven necessary. This tracing change has not yet been compiled or exercised in-game.
 
 ## References
 
