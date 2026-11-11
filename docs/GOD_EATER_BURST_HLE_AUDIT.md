@@ -53,3 +53,45 @@ For the initial discovery run, use Sekhmet's documented
 stubs cannot silently masquerade as successful calls.
 
 Do not use the God Eater 2 / NPJH50832 import inventory for this target.
+
+
+## Runtime evidence from Android log (2026-11-12)
+
+The first Android run reaches UMD READY/READABLE and opens
+`disc0:/PSP_GAME/USRDIR/package.rdp`. Vulkan and audio initialize on Adreno
+650. The decrypted ELF SHA-256 matches the Sekhmet profile.
+
+The first logged stub is `UtilsForUser::sceKernelGetGPI`. The next unknown
+import is `ThreadManForUser::0x6652B8CA` with:
+
+- `a0=0x00000BB8`
+- `a1=0x08830998`
+- `a2=0x08A89A5C`
+- `a3=0x08A89B44`
+- `ra=0x08831F84`
+
+PSP NID status maps `0x6652B8CA` to `sceKernelSetAlarm`. This import is
+not currently registered by PortableKit's ThreadMan HLE. Do not implement it
+as an unconditional success return: verify the clock units, callback ABI,
+common argument, cancellation/replacement behavior and timer scheduling first.
+
+The game then reports `src/fw/frame.c:826` assertion. The interpreter later
+stops at `0x088102CC` on instruction word `0x0000000D` (`break`). Given
+the preceding guest assertion, this may be an intentional assertion trap.
+Implement the Allegrex exception path rather than skipping the instruction.
+
+The log also reports 61 distinct ignored GE opcodes, but every recorded
+`first` parameter is zero. This is not enough evidence to implement those
+commands. Audit whether the logger is preserving the raw 32-bit GE command
+word and parameter bits.
+
+The no-font warning explains blank game text; it is separate from the
+assertion/stop. The MD5 extension's four functions being skipped is expected,
+because the built-in MD5 handlers are already registered.
+
+### Required follow-up
+
+- Implement and test `sceKernelSetAlarm` with PSP-compatible timing and callback semantics.
+- Capture the guest call stack and instruction context at the assertion and break.
+- Preserve raw GE command words and decode command parameters before adding handlers.
+- Keep assertion traps visible; never turn `break` into a no-op.
