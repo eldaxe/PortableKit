@@ -240,6 +240,8 @@ struct InterruptCall {
     std::uint32_t argument_count = 4u; // how many of `arguments` it takes
     // Invoked on the host after the guest handler returns, with its v0.
     std::function<void(std::uint32_t)> on_return;
+    // Optional validity check for cancellable deferred interrupt work.
+    std::function<bool()> is_valid;
 };
 
 class Kernel {
