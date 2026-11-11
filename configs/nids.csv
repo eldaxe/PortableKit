@@ -236,6 +236,7 @@ sceNetAdhocctl,0x34401D65,sceNetAdhocctlDisconnect
 sceNetAdhocctl,0x5E7F79C9,sceNetAdhocctlJoin
 sceNetAdhocctl,0x6402490B,sceNetAdhocctlDelHandler
 sceNetAdhocctl,0x75ECD386,sceNetAdhocctlGetState
+sceNetAdhocctl,0xDED9D28E,sceNetAdhocctlGetParameter
 sceNetAdhocctl,0x81AEE1BE,sceNetAdhocctlGetScanInfo
 sceNetAdhocctl,0x8DB83FDC,sceNetAdhocctlGetPeerInfo
 sceNetAdhocctl,0x9D689E13,sceNetAdhocctlTerm

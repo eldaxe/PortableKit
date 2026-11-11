@@ -360,6 +360,38 @@ void register_adhocctl(HleRegistrar &hle) {
         s.handlers.clear();
         done(ctx, "sceNetAdhocctlTerm", 0, 0u);
     });
+    hle.add("sceNetAdhocctl", "sceNetAdhocctlGetState", [](Runtime &rt, AllegrexContext &ctx) {
+        auto &memory = rt.memory();
+        const std::uint32_t output = arg(ctx, 0);
+        if (!state().ctl_initialized)
+            return done(ctx, "sceNetAdhocctlGetState", 1, err::kCtlNotInitialized);
+        if (output == 0u)
+            return done(ctx, "sceNetAdhocctlGetState", 1, err::kCtlInvalidArg);
+        pump_events();
+        // PSP states: 0 = disconnected, 1 = connected to a normal group.
+        const std::uint32_t current = Client::get().in_group() ? 1u : 0u;
+        memory.store32(output, current);
+        done(ctx, "sceNetAdhocctlGetState", 1, 0u, "state " + std::to_string(current));
+    });
+    hle.add("sceNetAdhocctl", "sceNetAdhocctlGetParameter", [](Runtime &rt, AllegrexContext &ctx) {
+        auto &memory = rt.memory();
+        const std::uint32_t output = arg(ctx, 0);
+        if (!state().ctl_initialized)
+            return done(ctx, "sceNetAdhocctlGetParameter", 1, err::kCtlNotInitialized);
+        if (output == 0u)
+            return done(ctx, "sceNetAdhocctlGetParameter", 1, err::kCtlInvalidArg);
+        pump_events();
+        const auto group = Client::get().group();
+        if (!group)
+            return done(ctx, "sceNetAdhocctlGetParameter", 1, 0x80410B09u, "not in a group");
+        // SceNetAdhocctlParams: channel, group[8], nickname[128], BSSID[6].
+        memory.store32(output, kAdhocChannel);
+        write_cstring(memory, output + 4u, group->name, 8u);
+        write_cstring(memory, output + 12u, nickname(), 128u);
+        write_mac(memory, output + 140u, group->host);
+        memory.store16(output + 146u, 0u);
+        done(ctx, "sceNetAdhocctlGetParameter", 1, 0u, "group " + group->name);
+    });
     hle.add("sceNetAdhocctl", "sceNetAdhocctlAddHandler", [](Runtime &, AllegrexContext &ctx) {
         State &s = state();
         if (arg(ctx, 0) == 0u) return done(ctx, "sceNetAdhocctlAddHandler", 2, err::kCtlInvalidArg);
