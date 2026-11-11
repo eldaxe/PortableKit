@@ -6,6 +6,23 @@
 namespace portablekit {
 
 const char *env(const char *name) {
+    // God Eater Burst builds collect GE draw and audio diagnostics by default:
+    // a black screen or silent mix should leave evidence without requiring
+    // the user to configure Android environment variables. Set
+    // GEBURST_DIAGNOSTICS=0 to disable these defaults; an explicit per-trace
+    // variable still takes precedence.
+    if (game().env_prefix == "GEBURST" &&
+        (std::string_view(name) == "TRACE_GE" || std::string_view(name) == "TRACE_AUDIO")) {
+        std::string full = game().env_prefix;
+        full += '_';
+        full += name;
+        if (const char *value = std::getenv(full.c_str()); value != nullptr) return value;
+        if (const char *diagnostics = std::getenv("GEBURST_DIAGNOSTICS");
+            diagnostics == nullptr || std::string_view(diagnostics) != "0")
+            return "1";
+        return nullptr;
+    }
+
     // The prefix is fixed for the life of the process, so the name is built
     // once per call and never kept: getenv's result points into the
     // environment, not into this string.
