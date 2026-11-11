@@ -939,7 +939,7 @@ bool find_vram_copy(std::uint32_t address, std::uint32_t &source, std::uint32_t 
 namespace {
 struct IgnoredCommand {
     std::uint64_t count{};
-    std::uint32_t first_value{};
+    std::array<std::uint32_t, 4> first_values{};
 };
 std::map<std::uint32_t, IgnoredCommand> &ignored_commands() {
     static std::map<std::uint32_t, IgnoredCommand> commands;
@@ -949,7 +949,8 @@ std::map<std::uint32_t, IgnoredCommand> &ignored_commands() {
 
 void GeState::trace_unhandled(std::uint32_t command, std::uint32_t data) {
     IgnoredCommand &entry = ignored_commands()[command];
-    if (entry.count == 0u) entry.first_value = data;
+    if (entry.count < entry.first_values.size())
+        entry.first_values[static_cast<std::size_t>(entry.count)] = data;
     ++entry.count;
     static const bool trace = portablekit::env("TRACE_FB_TEXTURES") != nullptr;
     if (!trace || entry.count > 4u) return;
@@ -959,9 +960,16 @@ void GeState::trace_unhandled(std::uint32_t command, std::uint32_t data) {
 void GeState::report_ignored_commands() {
     if (ignored_commands().empty()) return;
     std::cout << "GE commands ignored: " << ignored_commands().size() << " distinct\n";
-    for (const auto &[command, entry] : ignored_commands())
-        std::cout << "  0x" << std::hex << command << std::dec << " x" << entry.count << " first=0x" << std::hex
-                  << entry.first_value << std::dec << "\n";
+    for (const auto &[command, entry] : ignored_commands()) {
+        std::cout << "  0x" << std::hex << command << std::dec << " x" << entry.count << " data=";
+        const std::size_t count = static_cast<std::size_t>(
+            std::min<std::uint64_t>(entry.count, entry.first_values.size()));
+        for (std::size_t i = 0; i < count; ++i) {
+            if (i != 0u) std::cout << ",";
+            std::cout << "0x" << std::hex << entry.first_values[i];
+        }
+        std::cout << std::dec << "\n";
+    }
 }
 
 void GeState::fill_draw_state(DrawCall &call) const {
