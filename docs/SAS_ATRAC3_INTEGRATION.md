@@ -92,21 +92,47 @@ Reference behavior: PPSSPP `Core/HLE/sceSas.cpp`, `AtracBase.h`,
 do not copy their GPL implementation into PortableKit without a deliberate
 licensing decision.
 
-## Work in progress: guest context allocation scaffold
+## Implementation status on feature branch
 
-Commit `5981e163e163ade7331e42a06cd9b834b05cd3d9` adds a first scaffold in
-`host/hle/hle_atrac.cpp`:
+The branch now contains a first end-to-end source bridge:
 
-- Each loaded ATRAC ID can allocate an aligned 256-byte guest block.
-- `_sceAtracGetContextAddress` returns that block.
-- The 128-byte `SceAtracIdInfo` portion is populated with the basic track,
-  codec, buffer and position fields.
-- Replacing an ATRAC ID preserves its context allocation; releasing the ID
-  frees it.
+- `_sceAtracGetContextAddress` allocates and returns a 256-byte guest block
+  for a loaded ATRAC ID. The host `AtracContext` remains the sole owner of
+  the FFmpeg decoder and stream cursor.
+- The guest `SceAtracIdInfo` fields are mirrored at their 128-byte-offset
+  positions. The status becomes `ATRAC_STATUS_FOR_SCESAS` (16) while bound
+  to a SAS voice and returns to the normal full/halfway/streamed state on
+  unset.
+- `__sceSasSetVoiceATRAC3` validates the context, installs a callback-backed
+  SAS source, and stores the context pointer at `core + 56 * voice + 20`.
+- The SAS mixer obtains decoded ATRAC samples through the existing
+  `AtracDecoder`; it does not feed ATRAC bytes into the VAG ADPCM decoder.
+  The source is downmixed to mono before the existing SAS pan/volume stage.
+- `__sceSasConcatenateATRAC3` appends guest-supplied bytes to the same host
+  stream. When the SAS reader reaches unavailable streamed data while more
+  file bytes remain, the guest context's `secondBuffer` is set to
+  `0xFFFFFFFF`; a successful concatenate clears that request. Unset clears
+  the SAS core pointer and restores the ATRAC context's non-SAS state.
 
-This is **not yet the completed SAS bridge**. The guest context is currently
-a partial mirror, not a fully synchronized hardware context. In particular,
-streaming updates and decode-position changes are not all mirrored yet;
-the second-buffer handoff is not implemented; SAS does not yet own an ATRAC
-source callback; and the three SAS ATRAC NIDs remain unregistered. Treat this
-commit as an intermediate scaffold only, not as runtime-ready support.
+### Important limitations and verification
+
+This is still an initial integration, not a claim of hardware-complete
+ATRAC streaming. The stream bridge currently appends into the host's retained
+stream data; it does not model every PSP double-buffer/ring transition or
+all second-buffer timing rules. Decode failures and temporary stream
+underruns still need more detailed classification. The 128-byte codec-state
+half of the guest context is reserved/zeroed; FFmpeg state remains private to
+the host and is not serialized into that area.
+
+No local build or runtime test has been performed in this environment. The
+container cannot resolve GitHub, so the source could not be cloned for a
+local CMake build. CI must confirm that all changed C++ signatures compile.
+Required runtime tests remain: a complete ATRAC3 track, a streamed track with
+at least one concatenate, loop boundaries, voice key-on/key-off, unset and
+end flags, and audible output in God Eater Burst. Do not treat registration
+or a passing compile as proof of game compatibility.
+
+Reference behavior was checked against PPSSPP's public source for the
+256-byte `SceAtracContext`, the three SAS ATRAC function signatures, the
+context pointer location in the SAS core, and the mono SAS handoff. PPSSPP is
+used as a behavioral reference only; its GPL implementation was not copied.
