@@ -167,6 +167,10 @@ sceLibFont,0x02D7F94B,sceFontFlush
 sceLibFont,0x57FCB733,sceFontOpenUserFile
 sceLibFont,0xBB8E7FE6,sceFontOpenUserMemory
 sceLibFont,0xBC75D85B,sceFontGetFontList
+sceMd5,0x19884A15,sceMd5BlockInit
+sceMd5,0xA30206C2,sceMd5BlockUpdate
+sceMd5,0x4876AFFF,sceMd5BlockResult
+sceMd5,0x98E31A9E,sceMd5Digest
 sceLibFont,0xCA1E6945,sceFontGetCharGlyphImage_Clip
 sceMpeg,0x0E3C2E9D,sceMpegAvcDecode
 sceMpeg,0x0F6C18D7,sceMpegAvcDecodeDetail
