@@ -9,6 +9,7 @@
 
 #include "psprecomp/common.hpp"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstdint>
@@ -92,6 +93,7 @@ void transform(State &state, const std::uint8_t *block) {
     state.h[0] += a; state.h[1] += b; state.h[2] += c; state.h[3] += d;
 }
 void update(State &state, const std::uint8_t *data, std::size_t size) {
+    if (size == 0u) return;
     state.total += size;
     std::size_t offset = 0;
     if (state.remains != 0) {
