@@ -818,10 +818,10 @@ void register_callbacks_and_timers(HleRegistrar &hle) {
     });
     hle.add("ThreadManForUser", "sceKernelReferLwMutexStatusByID", [](Runtime &rt, AllegrexContext &ctx) {
         const SceUID uid = as_signed(arg(ctx, 0));
-        auto found = kernel().mutexes.find(uid);
-        if (found == kernel().mutexes.end() ||
-            std::none_of(lwmutex::by_work_area().begin(), lwmutex::by_work_area().end(),
-                         [uid](const auto &entry) { return entry.second == uid; })) {
+        const auto found = kernel().mutexes.find(uid);
+        const auto work_area = std::find_if(lwmutex::by_work_area().begin(), lwmutex::by_work_area().end(),
+                                            [uid](const auto &entry) { return entry.second == uid; });
+        if (found == kernel().mutexes.end() || work_area == lwmutex::by_work_area().end()) {
             kernel().finish(ctx, error::kMutexNotFound);
             return;
         }
@@ -833,7 +833,9 @@ void register_callbacks_and_timers(HleRegistrar &hle) {
         }
         const std::uint32_t size = memory.load32(info);
         if (size != 0u) {
-            constexpr std::uint32_t kSize = 56u;
+            // SceKernelLwMutexInfo: size, name[32], attr, uid, workarea,
+            // initialCount, currentCount, lockThread, numWaitThreads.
+            constexpr std::uint32_t kSize = 64u;
             std::array<std::uint8_t, kSize> bytes{};
             const auto put = [&bytes](std::uint32_t at, std::uint32_t value) {
                 for (unsigned i = 0; i < 4; ++i) bytes[at + i] = static_cast<std::uint8_t>(value >> (i * 8u));
@@ -842,10 +844,12 @@ void register_callbacks_and_timers(HleRegistrar &hle) {
             for (std::size_t i = 0; i < found->second.name.size() && i < 31u; ++i)
                 bytes[4u + i] = static_cast<std::uint8_t>(found->second.name[i]);
             put(36, found->second.attributes);
-            put(40, static_cast<std::uint32_t>(found->second.initial_count));
-            put(44, static_cast<std::uint32_t>(found->second.lock_count));
-            put(48, as_unsigned(found->second.owner));
-            put(52, static_cast<std::uint32_t>(found->second.waiters.size()));
+            put(40, as_unsigned(uid));
+            put(44, work_area->first);
+            put(48, static_cast<std::uint32_t>(found->second.initial_count));
+            put(52, static_cast<std::uint32_t>(found->second.lock_count));
+            put(56, found->second.owner == 0 ? 0xFFFFFFFFu : as_unsigned(found->second.owner));
+            put(60, static_cast<std::uint32_t>(found->second.waiters.size()));
             for (std::uint32_t i = 0; i < std::min(size, kSize); ++i) memory.store8(info + i, bytes[i]);
         }
         kernel().finish(ctx, 0u);
