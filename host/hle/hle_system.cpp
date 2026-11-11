@@ -647,16 +647,16 @@ void register_platform(HleRegistrar &hle) {
         kernel().finish(ctx, 0u);
     };
     hle.add("sceUtility", "sceUtilityLoadModule",
-            [](Runtime &, AllegrexContext &ctx) { trace_module("load", ctx); });
+            [trace_module](Runtime &, AllegrexContext &ctx) { trace_module("load", ctx); });
     // The dialogs themselves live in hle_utility.cpp.
     hle.add("sceUtility", "sceUtilityUnloadModule",
-            [](Runtime &, AllegrexContext &ctx) { trace_module("unload", ctx); });
+            [trace_module](Runtime &, AllegrexContext &ctx) { trace_module("unload", ctx); });
     // The audio and video modules (sceUtilityLoadAvModule(id)): the codecs
     // are the host's, always there.
     hle.add("sceUtility", "sceUtilityLoadAvModule",
-            [](Runtime &, AllegrexContext &ctx) { trace_module("load-av", ctx); });
+            [trace_module](Runtime &, AllegrexContext &ctx) { trace_module("load-av", ctx); });
     hle.add("sceUtility", "sceUtilityUnloadAvModule",
-            [](Runtime &, AllegrexContext &ctx) { trace_module("unload-av", ctx); });
+            [trace_module](Runtime &, AllegrexContext &ctx) { trace_module("unload-av", ctx); });
 }
 
 } // namespace
