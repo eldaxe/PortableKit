@@ -4,6 +4,7 @@
 // mixing themselves live under gpu/ and audio/.
 #include "../profile.hpp"
 #include "hle_common.hpp"
+#include "hle_atrac.hpp"
 #include "kernel/stall_watchdog.hpp"
 #include "kernel/fast_loading.hpp"
 #include "kernel/load_trace.hpp"
@@ -982,6 +983,62 @@ void register_audio(HleRegistrar &hle) {
         audio::sas_core(arg(ctx, 0)).init(arg(ctx, 1), arg(ctx, 2), arg(ctx, 3));
         kernel().finish(ctx, 0u);
     });
+    // ATRAC3 voice source. The 256-byte context is allocated and owned by
+    // sceAtrac; the SAS voice only retains callbacks into that same decoder.
+    hle.add("sceSasCore", "__sceSasSetVoiceATRAC3", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t core = arg(ctx, 0);
+        const std::uint32_t voice = arg(ctx, 1);
+        const std::uint32_t guest_context = arg(ctx, 2);
+        auto &memory = rt.memory();
+        if (voice >= audio::kSasMaxVoices) {
+            kernel().finish(ctx, 0x80420010u); // SCE_SAS_ERROR_INVALID_VOICE
+            return;
+        }
+        if ((guest_context & 3u) != 0u || !memory.contains(guest_context, 256u)) {
+            kernel().finish(ctx, 0x80420014u); // SCE_SAS_ERROR_INVALID_PARAMETER
+            return;
+        }
+        const auto reader = [guest_context](const psprecomp::GuestMemory &source_memory,
+                                             std::int16_t &left, std::int16_t &right) {
+            auto &mutable_memory = const_cast<psprecomp::GuestMemory &>(source_memory);
+            return audio::atrac_sas_read(mutable_memory, guest_context, left, right);
+        };
+        const auto enqueue = [guest_context](const psprecomp::GuestMemory &source_memory,
+                                              std::uint32_t address, std::uint32_t size) {
+            auto &mutable_memory = const_cast<psprecomp::GuestMemory &>(source_memory);
+            return audio::atrac_sas_enqueue(mutable_memory, guest_context, address, size);
+        };
+        if (!audio::sas_core(core).set_voice_atrac3(voice, reader, enqueue)) {
+            kernel().finish(ctx, 0x80420040u); // SCE_SAS_ERROR_ATRAC3_ALREADY_SET
+            return;
+        }
+        // PSP SDK exposes the source context pointer in the SAS core's
+        // per-voice state at +20 of each 56-byte voice record.
+        const std::uint32_t slot = core + 56u * voice + 20u;
+        if (memory.contains(slot, 4u)) memory.store32(slot, guest_context);
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("sceSasCore", "__sceSasConcatenateATRAC3", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t voice = arg(ctx, 1);
+        if (voice >= audio::kSasMaxVoices) {
+            kernel().finish(ctx, 0x80420010u);
+            return;
+        }
+        const bool accepted = audio::sas_core(arg(ctx, 0)).concatenate_atrac3(
+            voice, rt.memory(), arg(ctx, 2), arg(ctx, 3));
+        // The PSP implementation accepts an enqueue even for an already
+        // buffered stream; a full-file context has no additional data to add.
+        kernel().finish(ctx, accepted ? 0u : 0u);
+    });
+    hle.add("sceSasCore", "__sceSasUnsetATRAC3", [](Runtime &, AllegrexContext &ctx) {
+        const std::uint32_t voice = arg(ctx, 1);
+        if (voice >= audio::kSasMaxVoices) {
+            kernel().finish(ctx, 0x80420010u);
+            return;
+        }
+        kernel().finish(ctx, audio::sas_core(arg(ctx, 0)).unset_atrac3(voice) ? 0u : 0x80420041u);
+    });
+
     hle.add("sceSasCore", "__sceSasSetVoice", [](Runtime &, AllegrexContext &ctx) {
         if (trace_sas())
             std::cerr << "[sas] voice " << arg(ctx, 1) << " vag=" << psprecomp::hex32(arg(ctx, 2)) << " size=" << arg(ctx, 3)
