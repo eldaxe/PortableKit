@@ -238,6 +238,13 @@ void register_ringbuffer(HleRegistrar &hle) {
         finish_traced(ctx, "sceMpegRingbufferQueryMemSize",
                       arg(ctx, 0) * (static_cast<std::uint32_t>(movie::kPackSize) + kRingbufferPacketOverhead), {}, 1u);
     });
+    // PSP SDK: memorySize / (2048-byte MPEG pack + 104-byte ring overhead).
+    // This NID is used before constructing the movie ring buffer; returning the
+    // default logging-stub value (zero) makes the game's movie.c assert.
+    hle.add("sceMpeg", "sceMpegRingbufferQueryPackNum", [](Runtime &, AllegrexContext &ctx) {
+        finish_traced(ctx, "sceMpegRingbufferQueryPackNum",
+                      arg(ctx, 0) / (static_cast<std::uint32_t>(movie::kPackSize) + kRingbufferPacketOverhead), {}, 1u);
+    });
     // sceMpegRingbufferConstruct(ring, packets, data, size, callback, argument)
     hle.add("sceMpeg", "sceMpegRingbufferConstruct", [](Runtime &rt, AllegrexContext &ctx) {
         auto &memory = rt.memory();
