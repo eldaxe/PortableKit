@@ -642,7 +642,7 @@ void register_platform(HleRegistrar &hle) {
         if (portablekit::env("TRACE_UTILITY_MODULES") != nullptr) {
             std::cout << "[utility-module] " << operation
                       << " id=" << psprecomp::hex32(arg(ctx, 0))
-                      << " -> 0x00000000 (HLE-backed; no PRX mapped)\\n";
+                      << " -> 0x00000000 (HLE-backed; no PRX mapped)\n";
         }
         kernel().finish(ctx, 0u);
     };
