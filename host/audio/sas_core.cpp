@@ -160,14 +160,27 @@ bool SasCore::set_voice_atrac3(
     std::function<bool(const psprecomp::GuestMemory &, std::uint32_t, std::uint32_t)> enqueue) {
     if (voice >= kSasMaxVoices || !reader) return false;
     SasVoice &v = voices_[voice];
-    v = {};
+    if (v.atrac3) return false;
+    v.address = 0u;
+    v.size = 0u;
+    v.looping = false;
+    v.pcm = false;
+    v.noise = false;
     v.atrac3 = true;
     v.atrac_read = std::move(reader);
     v.atrac_enqueue = std::move(enqueue);
+    v.block = 0u;
+    v.loop_block = 0u;
     v.index = 28;
-    v.pitch = 0x1000u;
-    v.left = v.right = 0x1000;
+    v.phase = 0u;
+    v.history1 = v.history2 = 0;
+    v.previous = v.current = 0;
+    v.previous_right = v.current_right = 0;
+    v.source_waiting = false;
     v.source_ended = false;
+    v.primed = false;
+    v.paused = false;
+    v.playing = true;
     return true;
 }
 
