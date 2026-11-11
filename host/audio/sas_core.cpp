@@ -181,6 +181,18 @@ bool SasCore::set_voice_atrac3(
     v.primed = false;
     v.paused = false;
     v.playing = true;
+    v.envelope_counter = 0;
+    if (v.explicit_envelope && !envelopes_disabled()) {
+        v.stage = EnvelopeStage::Attack;
+        v.height = 0;
+        v.envelope = 0;
+    } else if (v.have_adsr && !envelopes_disabled()) {
+        v.stage = EnvelopeStage::Attack;
+        v.envelope = 0;
+    } else {
+        v.stage = EnvelopeStage::Sustain;
+        v.envelope = kEnvelopeMax;
+    }
     return true;
 }
 
