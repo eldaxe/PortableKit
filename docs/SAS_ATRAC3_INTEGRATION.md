@@ -19,16 +19,16 @@ integration boundary discovered while auditing PortableKit's current
 ## Required PSP behavior
 
 PPSSPP's `SceAtracContext` is 256 bytes: a 128-byte codec state followed by
-128-byte `SceAtracIdInfo`. Relevant info offsets relative to the full context:
+128-byte `SceAtracIdInfo`. Relevant info offsets relative to the full 256-byte context (the 128-byte codec state precedes `SceAtracIdInfo`):
 
 | Field | Full context offset |
 |---|---:|
-| `numChan` | 137 |
-| `sampleSize` | 138 |
-| `codec` | 140 |
-| `fileDataEnd` | 152 |
-| `streamDataByte` | 164 |
-| `buffer` | 176 |
+| `numChan` | 151 |
+| `sampleSize` | 152 |
+| `codec` | 154 |
+| `fileDataEnd` | 164 |
+| `streamDataByte` | 172 |
+| `buffer` | 184 |
 | `secondBuffer` | 188 |
 | `bufferByte` | 192 |
 | `secondBufferByte` | 196 |
