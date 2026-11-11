@@ -76,6 +76,7 @@ sceAtrac3plus,0x36FAABFB,sceAtracGetNextSample
 sceAtrac3plus,0x7DB31251,sceAtracAddStreamData
 sceAtrac3plus,0x83E85EA0,sceAtracGetSecondBufferInfo
 sceAtrac3plus,0xE88F759B,sceAtracGetInternalErrorInfo
+sceAtrac3plus,0x231FC6B7,_sceAtracGetContextAddress
 sceAudio,0x01562BA3,sceAudioOutput2Reserve
 sceAudio,0x136CAF51,sceAudioOutputBlocking
 sceAudio,0x13F592BC,sceAudioOutputPannedBlocking
@@ -347,6 +348,9 @@ sceSasCore,0xE175EF66,__sceSasGetOutputmode
 sceSasCore,0xE1CD9561,__sceSasSetVoicePCM
 sceSasCore,0xE855BF76,__sceSasSetOutputmode
 sceSasCore,0xF983B186,__sceSasRevVON
+sceSasCore,0x4AA9EAD6,__sceSasSetVoiceATRAC3
+sceSasCore,0x7497EA85,__sceSasConcatenateATRAC3
+sceSasCore,0xF6107F00,__sceSasUnsetATRAC3
 sceSsl,0x191CDEFF,sceSslEnd
 sceSsl,0x957ECBE2,sceSslInit
 sceSuspendForUser,0x090CCB3F,sceKernelPowerTick
