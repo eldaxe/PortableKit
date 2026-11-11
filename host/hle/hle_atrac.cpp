@@ -278,6 +278,9 @@ bool load_frame(const psprecomp::GuestMemory &memory, AtracContext &context, std
     return decoded;
 }
 
+// Defined below with the streaming position helpers.
+std::uint32_t current_frame_offset(const AtracContext &context);
+
 // SceAtracContext is 128 bytes of codec state followed by the 128-byte
 // SceAtracIdInfo. Keep the guest-visible fields in sync without exposing the
 // host FFmpeg decoder or its private state.
