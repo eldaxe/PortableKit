@@ -1083,7 +1083,13 @@ int atrac_sas_read(psprecomp::GuestMemory &memory, std::uint32_t guest_context,
         ++context->loops_done;
         if (context->loop_num > 0) --context->loop_num;
     }
-    if (context->streaming) trim_stored(*context);
+    if (context->streaming) {
+        trim_stored(*context);
+        // Request the next chunk before the SAS reader actually underruns.
+        // Two encoded frames leave room for the game to service the request.
+        if (context->cursor < track.file_size && remain_frames(*context) <= 2)
+            context->sas_needs_data = true;
+    }
     sync_guest_context(memory, *context);
     return 1;
 }
