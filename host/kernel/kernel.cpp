@@ -632,10 +632,11 @@ void Kernel::process_timers() {
                 kernel().alarms.erase(found);
                 return;
             }
-            const std::uint64_t next_deadline = scheduled + next_delay;
+            const std::uint64_t candidate = scheduled + next_delay;
+            const std::uint64_t next_deadline = candidate > kernel().now_us()
+                ? candidate : kernel().now_us() + next_delay;
             found->second.schedule_us = next_deadline;
-            found->second.deadline_us = std::max(next_deadline, kernel().now_us()) +
-                                        (next_deadline <= kernel().now_us() ? next_delay : 0u);
+            found->second.deadline_us = next_deadline;
         };
         // Disarm while the guest handler is running; it can cancel itself.
         alarm.deadline_us = UINT64_MAX;
