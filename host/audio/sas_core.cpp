@@ -660,6 +660,7 @@ void SasCore::render(psprecomp::GuestMemory &memory, std::int16_t *output, std::
             std::int32_t sample_right = 0;
             if (voice.noise) {
                 sample = noise_sample(voice);
+                sample_right = sample;
             } else {
                 const std::int32_t span = voice.current - voice.previous;
                 sample = voice.previous + ((span * static_cast<std::int32_t>(voice.phase)) >> 12);
