@@ -1036,8 +1036,11 @@ int atrac_sas_read(psprecomp::GuestMemory &memory, std::uint32_t guest_context,
     const std::int64_t first = decoded_index % frame_samples;
     if (!load_frame(memory, *context, frame)) return context->streaming ? -1 : 1;
     const std::size_t sample_index = static_cast<std::size_t>(first) * 2u;
-    left = context->cached[sample_index];
-    right = context->cached[sample_index + 1u];
+    // sceAtrac's SAS handoff switches its output to one channel; SAS
+    // applies the per-voice left/right volume after decoding.
+    const std::int32_t mono = (static_cast<std::int32_t>(context->cached[sample_index]) +
+                              static_cast<std::int32_t>(context->cached[sample_index + 1u])) / 2;
+    left = right = static_cast<std::int16_t>(mono);
 
     ++context->position;
     if (context->position > stop && loops) {
