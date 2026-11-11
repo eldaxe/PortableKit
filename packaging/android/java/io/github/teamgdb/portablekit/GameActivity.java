@@ -2,6 +2,7 @@ package io.github.teamgdb.portablekit;
 
 import android.content.ContentResolver;
 import android.content.Intent;
+import android.content.UriPermission;
 import android.content.pm.ActivityInfo;
 import android.database.Cursor;
 import android.graphics.Insets;
@@ -16,6 +17,7 @@ import android.view.WindowInsets;
 import org.libsdl.app.SDLActivity;
 
 import java.util.ArrayList;
+import java.util.Locale;
 
 /**
  * SDL's activity with what the host needs from Android and SDL does not
@@ -28,9 +30,11 @@ import java.util.ArrayList;
  */
 public class GameActivity extends SDLActivity {
     private static final int kPickTree = 0x59414b01;
+    private static final int kPickLogTree = 0x59414b02;
     private static final Object sPickLock = new Object();
     private static boolean sPickDone;
     private static String sPickResult;
+    private static String sPendingLogFolder;
 
     /**
      * Keeps the game in landscape, either way up, as the manifest asks. SDL
@@ -73,7 +77,7 @@ public class GameActivity extends SDLActivity {
     public static String pickFolder() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-        return pick(intent);
+        return pick(intent, kPickTree);
     }
 
     /** Asks the player for a file to read; its document URI, or null when cancelled. */
@@ -83,10 +87,70 @@ public class GameActivity extends SDLActivity {
         // Disc images have no MIME type every provider agrees on.
         intent.setType("*/*");
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        return pick(intent);
+        return pick(intent, kPickTree);
     }
 
-    private static String pick(Intent intent) {
+    /** Opens the persistent SAF log in /sdcard/<folderName>/log.txt. */
+    public static int openLogFile(String folderName) {
+        if (mSingleton == null || folderName == null) return -1;
+        final String folder = folderName.toLowerCase(Locale.ROOT);
+        if (!folder.matches("[a-z0-9_-]+")) return -1;
+        final String preferenceKey = "log_tree_uri_" + folder;
+        final android.content.SharedPreferences preferences =
+            mSingleton.getSharedPreferences("portablekit_storage", MODE_PRIVATE);
+        String treeText = preferences.getString(preferenceKey, null);
+        Uri tree = treeText != null ? Uri.parse(treeText) : null;
+        if (!hasPersistedWritePermission(tree) ||
+            !("primary:" + folder).equals(DocumentsContract.getTreeDocumentId(tree))) {
+            preferences.edit().remove(preferenceKey).apply();
+            sPendingLogFolder = folder;
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION |
+                            Intent.FLAG_GRANT_WRITE_URI_PERMISSION |
+                            Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+            intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI,
+                DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:" + folder));
+            treeText = pick(intent, kPickLogTree);
+            if (treeText == null) return -1;
+            tree = Uri.parse(treeText);
+        }
+
+        try {
+            Uri root = DocumentsContract.buildDocumentUriUsingTree(tree,
+                DocumentsContract.getTreeDocumentId(tree));
+            String logUri = null;
+            String[] entries = listFolder(root.toString());
+            if (entries == null) return -1;
+            for (String entry : entries) {
+                if (entry.startsWith("f/log.txt/")) {
+                    int separator = entry.indexOf('/', 2);
+                    if (separator >= 0) logUri = entry.substring(separator + 1);
+                    break;
+                }
+            }
+            if (logUri == null) {
+                Uri created = DocumentsContract.createDocument(mSingleton.getContentResolver(), root,
+                    "text/plain", "log.txt");
+                if (created == null) return -1;
+                logUri = created.toString();
+            }
+            ParcelFileDescriptor descriptor = mSingleton.getContentResolver()
+                .openFileDescriptor(Uri.parse(logUri), "wa");
+            return descriptor != null ? descriptor.detachFd() : -1;
+        } catch (Exception e) {
+            return -1;
+        }
+    }
+
+    private static boolean hasPersistedWritePermission(Uri uri) {
+        if (uri == null || mSingleton == null) return false;
+        for (UriPermission permission : mSingleton.getContentResolver().getPersistedUriPermissions()) {
+            if (permission.getUri().equals(uri) && permission.isWritePermission()) return true;
+        }
+        return false;
+    }
+
+    private static String pick(Intent intent, int requestCode) {
         if (mSingleton == null) return null;
         synchronized (sPickLock) {
             sPickDone = false;
@@ -94,7 +158,7 @@ public class GameActivity extends SDLActivity {
         }
         mSingleton.runOnUiThread(() -> {
             try {
-                mSingleton.startActivityForResult(intent, kPickTree);
+                mSingleton.startActivityForResult(intent, requestCode);
             } catch (Exception e) {
                 finishPick(null);
             }
@@ -121,6 +185,30 @@ public class GameActivity extends SDLActivity {
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode == kPickLogTree) {
+            Uri uri = resultCode == RESULT_OK && data != null ? data.getData() : null;
+            String result = null;
+            if (uri != null && data != null && sPendingLogFolder != null) {
+                String expectedId = "primary:" + sPendingLogFolder;
+                int grantFlags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION |
+                                                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                try {
+                    if (expectedId.equals(DocumentsContract.getTreeDocumentId(uri)) &&
+                        (data.getFlags() & Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION) != 0 &&
+                        (grantFlags & Intent.FLAG_GRANT_WRITE_URI_PERMISSION) != 0) {
+                        mSingleton.getContentResolver().takePersistableUriPermission(uri, grantFlags);
+                        mSingleton.getSharedPreferences("portablekit_storage", MODE_PRIVATE).edit()
+                            .putString("log_tree_uri_" + sPendingLogFolder, uri.toString()).apply();
+                        result = uri.toString();
+                    }
+                } catch (Exception ignored) {
+                    result = null;
+                }
+            }
+            sPendingLogFolder = null;
+            finishPick(result);
+            return;
+        }
         if (requestCode == kPickTree) {
             Uri uri = resultCode == RESULT_OK && data != null ? data.getData() : null;
             finishPick(uri != null ? uri.toString() : null);
