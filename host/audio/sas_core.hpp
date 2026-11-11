@@ -99,9 +99,9 @@ public:
     void set_voice_pcm(std::uint32_t voice, std::uint32_t address, std::uint32_t size, std::int32_t loop);
     [[nodiscard]] bool set_voice_atrac3(
         std::uint32_t voice,
-        std::function<int(const psprecomp::GuestMemory &, std::int16_t &, std::int16_t &)> reader,
-        std::function<bool(const psprecomp::GuestMemory &, std::uint32_t, std::uint32_t)> enqueue);
-    [[nodiscard]] bool concatenate_atrac3(std::uint32_t voice, const psprecomp::GuestMemory &memory,
+        std::function<int(psprecomp::GuestMemory &, std::int16_t &, std::int16_t &)> reader,
+        std::function<bool(psprecomp::GuestMemory &, std::uint32_t, std::uint32_t)> enqueue);
+    [[nodiscard]] bool concatenate_atrac3(std::uint32_t voice, psprecomp::GuestMemory &memory,
                                            std::uint32_t address, std::uint32_t size);
     [[nodiscard]] bool unset_atrac3(std::uint32_t voice);
     void set_noise(std::uint32_t voice, std::uint32_t clock);
