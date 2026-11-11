@@ -244,6 +244,19 @@ std::uint64_t play_order(const AtracContext &context, std::uint32_t offset, std:
     return offset + static_cast<std::uint64_t>(passes) * loop_bytes;
 }
 
+bool frame_available(const psprecomp::GuestMemory &memory, const AtracContext &context, std::int64_t frame) {
+    if (frame < 0) return false;
+    const std::uint64_t offset = context.track.data_offset +
+        static_cast<std::uint64_t>(frame) * context.track.block_align;
+    const std::uint64_t end = offset + context.track.block_align;
+    if (context.streaming) {
+        return offset >= context.stored_from &&
+               end <= static_cast<std::uint64_t>(context.stored_from) + context.stored.size();
+    }
+    return end <= std::min(context.buffer_size, context.track.data_offset + context.track.data_size) &&
+           memory.contains(context.buffer + static_cast<std::uint32_t>(offset), context.track.block_align);
+}
+
 // Decodes stream frame `frame` into the cache, reseeding the decoder when the
 // request is not the frame that follows the last one it decoded.
 bool load_frame(const psprecomp::GuestMemory &memory, AtracContext &context, std::int64_t frame) {
@@ -1045,14 +1058,17 @@ int atrac_sas_read(psprecomp::GuestMemory &memory, std::uint32_t guest_context,
     const std::int64_t frame = decoded_index / frame_samples;
     const std::int64_t first = decoded_index % frame_samples;
     if (!load_frame(memory, *context, frame)) {
-        if (context->streaming && context->cursor < track.file_size) {
+        const bool missing = !frame_available(memory, *context, frame);
+        if (context->streaming && missing && context->cursor < track.file_size) {
             context->sas_needs_data = true;
             sync_guest_context(memory, *context);
             return -1;
         }
+        // Encoded bytes are present but the decoder rejected them: stop the
+        // SAS source rather than turning a codec failure into endless silence.
         context->sas_needs_data = false;
         sync_guest_context(memory, *context);
-        return context->streaming ? 0 : 1;
+        return 0;
     }
     const std::size_t sample_index = static_cast<std::size_t>(first) * 2u;
     // sceAtrac's SAS handoff switches its output to one channel; SAS
