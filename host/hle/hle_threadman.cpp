@@ -663,6 +663,57 @@ void register_callbacks_and_timers(HleRegistrar &hle) {
         kernel().finish(ctx, kernel().callbacks.erase(as_signed(arg(ctx, 0))) != 0u ? 0u : error::kUnknownCbid);
     });
 
+    // sceKernelSetAlarm(clock_us, handler, common). PSP runs the handler in
+    // interrupt context with common in a0; a positive return value requests
+    // another firing after that many microseconds.
+    const auto set_alarm = [](Runtime &rt, AllegrexContext &ctx, std::uint64_t delay_us) {
+        const std::uint32_t handler = arg(ctx, 1);
+        if (handler == 0u || !rt.memory().contains(handler, 4u)) {
+            kernel().finish(ctx, error::kIllegalAddress);
+            return;
+        }
+        const SceUID uid = kernel().allocate_uid();
+        const std::uint64_t requested = kernel().now_us() + delay_us;
+        const std::uint64_t first_delay = std::max<std::uint64_t>(delay_us, 215u);
+        kernel().alarms[uid] = Alarm{requested, kernel().now_us() + first_delay, handler, arg(ctx, 2)};
+        kernel().finish(ctx, as_unsigned(uid));
+    };
+    hle.add("ThreadManForUser", "sceKernelSetAlarm", [set_alarm](Runtime &rt, AllegrexContext &ctx) {
+        set_alarm(rt, ctx, arg(ctx, 0));
+    });
+    hle.add("ThreadManForUser", "sceKernelSetSysClockAlarm", [set_alarm](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t clock_address = arg(ctx, 0);
+        if ((clock_address & 3u) != 0u || !rt.memory().contains(clock_address, 8u)) {
+            kernel().finish(ctx, error::kIllegalAddress);
+            return;
+        }
+        set_alarm(rt, ctx, static_cast<std::uint64_t>(rt.memory().load32(clock_address)) |
+                           (static_cast<std::uint64_t>(rt.memory().load32(clock_address + 4u)) << 32u));
+    });
+    hle.add("ThreadManForUser", "sceKernelCancelAlarm", [](Runtime &, AllegrexContext &ctx) {
+        const SceUID uid = as_signed(arg(ctx, 0));
+        kernel().finish(ctx, kernel().alarms.erase(uid) != 0u ? 0u : error::kUnknownAlmid);
+    });
+    hle.add("ThreadManForUser", "sceKernelReferAlarmStatus", [](Runtime &rt, AllegrexContext &ctx) {
+        const SceUID uid = as_signed(arg(ctx, 0));
+        const auto found = kernel().alarms.find(uid);
+        const std::uint32_t info = arg(ctx, 1);
+        if (found == kernel().alarms.end()) {
+            kernel().finish(ctx, error::kUnknownAlmid);
+            return;
+        }
+        if (!rt.memory().contains(info, 20u)) {
+            kernel().finish(ctx, error::kIllegalAddress);
+            return;
+        }
+        const std::uint32_t size = rt.memory().load32(info);
+        if (size > 0u) rt.memory().store32(info, 20u);
+        if (size > 4u) store64(rt.memory(), info + 4u, found->second.schedule_us);
+        if (size > 12u) rt.memory().store32(info + 12u, found->second.handler);
+        if (size > 16u) rt.memory().store32(info + 16u, found->second.common);
+        kernel().finish(ctx, 0u);
+    });
+
     hle.add("ThreadManForUser", "sceKernelCreateVTimer", [](Runtime &rt, AllegrexContext &ctx) {
         const SceUID uid = kernel().allocate_uid();
         VTimer timer{};
