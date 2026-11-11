@@ -10,6 +10,9 @@
 #include "psprecomp/common.hpp"
 
 #include <array>
+#include <bit>
+#include <cstdint>
+#include <vector>
 #include <chrono>
 #include <cstring>
 #include <ctime>
@@ -32,6 +35,181 @@ std::uint64_t boot_unix_us() {
 std::uint64_t guest_unix_us() { return boot_unix_us() + kernel().now_us(); }
 
 void success(Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, 0u); }
+
+// sceMd5's guest context is the PSPSDK SceKernelUtilsMd5Context layout:
+// h[4], pad, remains, computed, total length, then a 64-byte block buffer.
+// Keep all state in guest memory so multiple independent contexts work.
+namespace md5 {
+constexpr std::uint32_t kBadAddress = 0x800200D3u;
+constexpr std::uint32_t kContextSize = 96u;
+constexpr std::uint32_t kBufferOffset = 32u;
+constexpr std::array<std::uint32_t, 64> kConstants = {
+    0xd76aa478u, 0xe8c7b756u, 0x242070dbu, 0xc1bdceeeu, 0xf57c0fafu, 0x4787c62au, 0xa8304613u, 0xfd469501u,
+    0x698098d8u, 0x8b44f7afu, 0xffff5bb1u, 0x895cd7beu, 0x6b901122u, 0xfd987193u, 0xa679438eu, 0x49b40821u,
+    0xf61e2562u, 0xc040b340u, 0x265e5a51u, 0xe9b6c7aau, 0xd62f105du, 0x02441453u, 0xd8a1e681u, 0xe7d3fbc8u,
+    0x21e1cde6u, 0xc33707d6u, 0xf4d50d87u, 0x455a14edu, 0xa9e3e905u, 0xfcefa3f8u, 0x676f02d9u, 0x8d2a4c8au,
+    0xfffa3942u, 0x8771f681u, 0x6d9d6122u, 0xfde5380cu, 0xa4beea44u, 0x4bdecfa9u, 0xf6bb4b60u, 0xbebfbc70u,
+    0x289b7ec6u, 0xeaa127fau, 0xd4ef3085u, 0x04881d05u, 0xd9d4d039u, 0xe6db99e5u, 0x1fa27cf8u, 0xc4ac5665u,
+    0xf4292244u, 0x432aff97u, 0xab9423a7u, 0xfc93a039u, 0x655b59c3u, 0x8f0ccc92u, 0xffeff47du, 0x85845dd1u,
+    0x6fa87e4fu, 0xfe2ce6e0u, 0xa3014314u, 0x4e0811a1u, 0xf7537e82u, 0xbd3af235u, 0x2ad7d2bbu, 0xeb86d391u
+};
+constexpr std::array<unsigned, 64> kShifts = {
+    7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,
+    5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,
+    4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23,
+    6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21
+};
+struct State {
+    std::array<std::uint32_t, 4> h{0x67452301u, 0xefcdab89u, 0x98badcfeu, 0x10325476u};
+    std::uint64_t total{};
+    std::uint16_t remains{};
+    std::array<std::uint8_t, 64> buffer{};
+};
+std::uint32_t load32(const psprecomp::GuestMemory &memory, std::uint32_t address) {
+    return memory.load32(address);
+}
+void transform(State &state, const std::uint8_t *block) {
+    std::array<std::uint32_t, 16> words{};
+    for (unsigned i = 0; i < 16; ++i) {
+        const unsigned p = i * 4;
+        words[i] = static_cast<std::uint32_t>(block[p]) |
+                   (static_cast<std::uint32_t>(block[p + 1]) << 8u) |
+                   (static_cast<std::uint32_t>(block[p + 2]) << 16u) |
+                   (static_cast<std::uint32_t>(block[p + 3]) << 24u);
+    }
+    std::uint32_t a = state.h[0], b = state.h[1], c = state.h[2], d = state.h[3];
+    for (unsigned i = 0; i < 64; ++i) {
+        std::uint32_t f{};
+        unsigned g{};
+        if (i < 16) { f = (b & c) | (~b & d); g = i; }
+        else if (i < 32) { f = (d & b) | (~d & c); g = (5u * i + 1u) & 15u; }
+        else if (i < 48) { f = b ^ c ^ d; g = (3u * i + 5u) & 15u; }
+        else { f = c ^ (b | ~d); g = (7u * i) & 15u; }
+        const std::uint32_t next = b + std::rotl(a + f + kConstants[i] + words[g],
+                                                  static_cast<int>(kShifts[i]));
+        a = d; d = c; c = b; b = next;
+    }
+    state.h[0] += a; state.h[1] += b; state.h[2] += c; state.h[3] += d;
+}
+void update(State &state, const std::uint8_t *data, std::size_t size) {
+    state.total += size;
+    std::size_t offset = 0;
+    if (state.remains != 0) {
+        const std::size_t take = std::min<std::size_t>(64u - state.remains, size);
+        std::copy_n(data, take, state.buffer.begin() + state.remains);
+        state.remains = static_cast<std::uint16_t>(state.remains + take);
+        offset += take;
+        if (state.remains == 64u) {
+            transform(state, state.buffer.data());
+            state.remains = 0;
+        }
+    }
+    while (offset + 64u <= size) {
+        transform(state, data + offset);
+        offset += 64u;
+    }
+    if (offset < size) {
+        const std::size_t left = size - offset;
+        std::copy_n(data + offset, left, state.buffer.begin());
+        state.remains = static_cast<std::uint16_t>(left);
+    }
+}
+std::array<std::uint8_t, 16> finish(State state) {
+    const std::uint64_t bits = state.total * 8u;
+    state.buffer[state.remains++] = 0x80u;
+    if (state.remains > 56u) {
+        std::fill(state.buffer.begin() + state.remains, state.buffer.end(), 0u);
+        transform(state, state.buffer.data());
+        state.remains = 0;
+    }
+    std::fill(state.buffer.begin() + state.remains, state.buffer.begin() + 56, 0u);
+    for (unsigned i = 0; i < 8; ++i)
+        state.buffer[56u + i] = static_cast<std::uint8_t>(bits >> (i * 8u));
+    transform(state, state.buffer.data());
+    std::array<std::uint8_t, 16> digest{};
+    for (unsigned i = 0; i < 4; ++i)
+        for (unsigned j = 0; j < 4; ++j)
+            digest[i * 4u + j] = static_cast<std::uint8_t>(state.h[i] >> (j * 8u));
+    return digest;
+}
+bool read_context(const psprecomp::GuestMemory &memory, std::uint32_t address, State &state) {
+    if (address == 0u || !memory.contains(address, kContextSize)) return false;
+    for (unsigned i = 0; i < 4; ++i) state.h[i] = load32(memory, address + i * 4u);
+    state.remains = memory.load16(address + 20u);
+    state.total = static_cast<std::uint64_t>(load32(memory, address + 24u)) |
+                  (static_cast<std::uint64_t>(load32(memory, address + 28u)) << 32u);
+    if (state.remains > 63u) return false;
+    memory.copy_out(address + kBufferOffset, state.buffer);
+    return true;
+}
+void write_context(psprecomp::GuestMemory &memory, std::uint32_t address, const State &state) {
+    for (unsigned i = 0; i < 4; ++i) memory.store32(address + i * 4u, state.h[i]);
+    memory.store32(address + 16u, 0u);
+    memory.store16(address + 20u, state.remains);
+    memory.store16(address + 22u, 0u);
+    memory.store32(address + 24u, static_cast<std::uint32_t>(state.total));
+    memory.store32(address + 28u, static_cast<std::uint32_t>(state.total >> 32u));
+    memory.copy_in(address + kBufferOffset, state.buffer);
+}
+bool read_data(const psprecomp::GuestMemory &memory, std::uint32_t address, std::uint32_t size,
+               std::vector<std::uint8_t> &data) {
+    if (size == 0u) { data.clear(); return true; }
+    if (address == 0u || !memory.contains(address, size)) return false;
+    data.resize(size);
+    memory.copy_out(address, data);
+    return true;
+}
+void write_digest(psprecomp::GuestMemory &memory, std::uint32_t address,
+                  const std::array<std::uint8_t, 16> &digest) {
+    memory.copy_in(address, digest);
+}
+} // namespace md5
+
+void register_md5(HleRegistrar &hle) {
+    hle.add("sceMd5", "sceMd5BlockInit", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t address = arg(ctx, 0);
+        if (address == 0u || !rt.memory().contains(address, md5::kContextSize)) {
+            kernel().finish(ctx, md5::kBadAddress); return;
+        }
+        md5::State state{};
+        md5::write_context(rt.memory(), address, state);
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("sceMd5", "sceMd5BlockUpdate", [](Runtime &rt, AllegrexContext &ctx) {
+        md5::State state{};
+        const std::uint32_t context = arg(ctx, 0), source = arg(ctx, 1), size = arg(ctx, 2);
+        std::vector<std::uint8_t> data;
+        if (!md5::read_context(rt.memory(), context, state) ||
+            !md5::read_data(rt.memory(), source, size, data)) {
+            kernel().finish(ctx, md5::kBadAddress); return;
+        }
+        md5::update(state, data.data(), data.size());
+        md5::write_context(rt.memory(), context, state);
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("sceMd5", "sceMd5BlockResult", [](Runtime &rt, AllegrexContext &ctx) {
+        md5::State state{};
+        const std::uint32_t context = arg(ctx, 0), output = arg(ctx, 1);
+        if (!md5::read_context(rt.memory(), context, state) || output == 0u ||
+            !rt.memory().contains(output, 16u)) {
+            kernel().finish(ctx, md5::kBadAddress); return;
+        }
+        md5::write_digest(rt.memory(), output, md5::finish(state));
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("sceMd5", "sceMd5Digest", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t source = arg(ctx, 0), size = arg(ctx, 1), output = arg(ctx, 2);
+        std::vector<std::uint8_t> data;
+        if (output == 0u || !rt.memory().contains(output, 16u) ||
+            !md5::read_data(rt.memory(), source, size, data)) {
+            kernel().finish(ctx, md5::kBadAddress); return;
+        }
+        md5::State state{};
+        md5::update(state, data.data(), data.size());
+        md5::write_digest(rt.memory(), output, md5::finish(state));
+        kernel().finish(ctx, 0u);
+    });
+}
 
 // The console settings a game asks for and tells the system, under
 // TRACE_KERNEL: which language and which confirm button it ends up using.
@@ -442,6 +620,7 @@ void register_rtc_calendar(HleRegistrar &hle) {
 }
 
 void register_system(HleRegistrar &hle) {
+    register_md5(hle);
     register_utils(hle);
     register_process(hle);
     register_interrupts(hle);
