@@ -998,6 +998,11 @@ void register_audio(HleRegistrar &hle) {
             kernel().finish(ctx, 0x80420014u); // SCE_SAS_ERROR_INVALID_PARAMETER
             return;
         }
+        const std::uint32_t slot = core + 56u * voice + 20u;
+        if (slot < core || !memory.contains(slot, 4u)) {
+            kernel().finish(ctx, 0x80420014u);
+            return;
+        }
         const auto reader = [guest_context](psprecomp::GuestMemory &source_memory,
                                              std::int16_t &left, std::int16_t &right) {
             return audio::atrac_sas_read(source_memory, guest_context, left, right);
@@ -1010,10 +1015,14 @@ void register_audio(HleRegistrar &hle) {
             kernel().finish(ctx, 0x80420040u); // SCE_SAS_ERROR_ATRAC3_ALREADY_SET
             return;
         }
-        // PSP SDK exposes the source context pointer in the SAS core's
-        // per-voice state at +20 of each 56-byte voice record.
-        const std::uint32_t slot = core + 56u * voice + 20u;
-        if (memory.contains(slot, 4u)) memory.store32(slot, guest_context);
+        if (!audio::atrac_sas_bind(memory, guest_context)) {
+            (void)audio::sas_core(core).unset_atrac3(voice);
+            kernel().finish(ctx, 0x80420014u);
+            return;
+        }
+        // The PSP core stores the context pointer at +20 in each 56-byte
+        // per-voice record.
+        memory.store32(slot, guest_context);
         kernel().finish(ctx, 0u);
     });
     hle.add("sceSasCore", "__sceSasConcatenateATRAC3", [](Runtime &rt, AllegrexContext &ctx) {
@@ -1026,13 +1035,20 @@ void register_audio(HleRegistrar &hle) {
             voice, rt.memory(), arg(ctx, 2), arg(ctx, 3));
         kernel().finish(ctx, accepted ? 0u : 0x80420041u);
     });
-    hle.add("sceSasCore", "__sceSasUnsetATRAC3", [](Runtime &, AllegrexContext &ctx) {
+    hle.add("sceSasCore", "__sceSasUnsetATRAC3", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t core = arg(ctx, 0);
         const std::uint32_t voice = arg(ctx, 1);
         if (voice >= audio::kSasMaxVoices) {
             kernel().finish(ctx, 0x80420010u);
             return;
         }
-        kernel().finish(ctx, audio::sas_core(arg(ctx, 0)).unset_atrac3(voice) ? 0u : 0x80420041u);
+        if (!audio::sas_core(core).unset_atrac3(voice)) {
+            kernel().finish(ctx, 0x80420041u);
+            return;
+        }
+        const std::uint32_t slot = core + 56u * voice + 20u;
+        if (slot >= core && rt.memory().contains(slot, 4u)) rt.memory().store32(slot, 0u);
+        kernel().finish(ctx, 0u);
     });
 
     hle.add("sceSasCore", "__sceSasSetVoice", [](Runtime &, AllegrexContext &ctx) {
