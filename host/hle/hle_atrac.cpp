@@ -320,8 +320,8 @@ void sync_guest_context(psprecomp::GuestMemory &memory, AtracContext &context) {
     put32(12u, track.loop_end < 0 ? 0u : static_cast<std::uint32_t>(track.loop_end) + track.skip); // loopEnd
     put32(16u, track.skip);                                        // firstValidSample
     memory.store8(info + 20u, 0u);                                 // numSkipFrames
-    memory.store8(info + 21u, context.sas_bound ? 16u : (context.low_level ? 8u :
-                   (context.streaming ? (context.buffer_size >= track.file_size ? 3u : 4u) : 2u))); // state
+    memory.store8(info + 21u, static_cast<std::uint8_t>(context.sas_bound ? 16u : (context.low_level ? 8u :
+                   (context.streaming ? (context.buffer_size >= track.file_size ? 3u : 4u) : 2u)))); // state
     memory.store8(info + 22u, 0u);                                 // curBuffer
     memory.store8(info + 23u, static_cast<std::uint8_t>(track.channels)); // numChan
     memory.store16(info + 24u, static_cast<std::uint16_t>(track.block_align)); // sampleSize
