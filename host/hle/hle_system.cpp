@@ -366,7 +366,7 @@ void register_process(HleRegistrar &hle) {
     });
     hle.add("ModuleMgrForUser", "sceKernelQueryModuleInfo", [](Runtime &rt, AllegrexContext &ctx) {
         const std::uint32_t uid = arg(ctx, 0), info = arg(ctx, 1);
-        if (info == 0u || !rt.memory().contains(info, 0x40u)) {
+        if (info == 0u || !rt.memory().contains(info, 4u)) {
             kernel().finish(ctx, error::kIllegalArgument);
             return;
         }
@@ -376,7 +376,7 @@ void register_process(HleRegistrar &hle) {
             return;
         }
         const std::uint32_t size = rt.memory().load32(info);
-        if (size != 0x40u && size != 0x60u) {
+        if ((size != 0x40u && size != 0x60u) || !rt.memory().contains(info, size)) {
             kernel().finish(ctx, error::kIllegalArgument);
             return;
         }
@@ -388,7 +388,9 @@ void register_process(HleRegistrar &hle) {
         rt.memory().store8(info + 4u, 0u); // nsegment
         if (size == 0x60u) {
             const std::string &name = found->second.name;
-            write_cstring(rt.memory(), info + 0x44u, name, 28u);
+            for (std::uint32_t i = 0; i < 28u; ++i)
+                rt.memory().store8(info + 0x44u + i,
+                    i < name.size() ? static_cast<std::uint8_t>(name[i]) : 0u);
         }
         kernel().finish(ctx, 0u);
     });
@@ -553,7 +555,7 @@ void register_platform(HleRegistrar &hle) {
         const bool edat = count == 8 && magic[0] == 0u && magic[1] == 'P' &&
                           magic[2] == 'S' && magic[3] == 'P' &&
                           magic[4] == 'E' && magic[5] == 'D' && magic[6] == 'A' && magic[7] == 'T';
-        kernel().finish(ctx, edat ? kNpDrmNoFilenameMatch : 0u);
+        kernel().finish(ctx, edat ? kNpDrmInternalError : 0u);
     });
     hle.add("scePspNpDrm_user", "sceNpDrmEdataSetupKey", [](Runtime &rt, AllegrexContext &ctx) {
         if (!npdrm_state().licensee_key_set) {
