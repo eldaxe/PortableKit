@@ -69,6 +69,18 @@ Insets cutout_insets() {
     return {values[0], values[1], values[2], values[3]};
 }
 
+int open_log_file(const std::string &folder_name) {
+    Call call;
+    if (!call.ok()) return -1;
+    jmethodID id = call.method("openLogFile", "(Ljava/lang/String;)I");
+    if (id == nullptr) return -1;
+    jstring folder = call.string(folder_name);
+    const jint fd = call.env->CallStaticIntMethod(call.type, id, folder);
+    call.env->DeleteLocalRef(folder);
+    if (call.failed()) return -1;
+    return fd;
+}
+
 void relaunch() {
     Call call;
     if (!call.ok()) return;
