@@ -652,6 +652,8 @@ void register_mutexes(HleRegistrar &hle) {
     });
 }
 
+namespace lwmutex { std::map<std::uint32_t, SceUID> &by_work_area(); }
+
 void register_callbacks_and_timers(HleRegistrar &hle) {
     hle.add("ThreadManForUser", "sceKernelCreateCallback", [](Runtime &rt, AllegrexContext &ctx) {
         const SceUID uid = kernel().allocate_uid();
