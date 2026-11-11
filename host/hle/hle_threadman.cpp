@@ -925,6 +925,38 @@ void register_lightweight_mutexes(HleRegistrar &hle) {
     };
     hle.add("Kernel_Library", "sceKernelLockLwMutex", lock);
     hle.add("Kernel_Library", "sceKernelLockLwMutexCB", lock);
+    // Non-blocking counterpart to sceKernelLockLwMutex. Unlike the generic
+    // logging stub, this must report contention so callers can decide whether
+    // to retry or take their file-system error path.
+    hle.add("Kernel_Library", "sceKernelTryLockLwMutex_600", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t work_area = arg(ctx, 0);
+        const std::int32_t count = as_signed(arg(ctx, 1));
+        SceUID uid = 0;
+        Mutex *mutex = lwmutex::find(work_area, uid);
+        if (mutex == nullptr) {
+            kernel().finish(ctx, error::kMutexNotFound);
+            return;
+        }
+        if (count <= 0) {
+            kernel().finish(ctx, error::kIllegalCount);
+            return;
+        }
+        if (mutex->lock_count == 0) {
+            mutex->owner = kernel().current_uid();
+            mutex->lock_count = count;
+        } else if (mutex->owner == kernel().current_uid()) {
+            if ((mutex->attributes & kMutexAttrRecursive) == 0u) {
+                kernel().finish(ctx, error::kMutexRecursiveNotAllowed);
+                return;
+            }
+            mutex->lock_count += count;
+        } else {
+            kernel().finish(ctx, error::kMutexLocked);
+            return;
+        }
+        lwmutex::write_state(rt.memory(), work_area, *mutex);
+        kernel().finish(ctx, 0u);
+    });
     hle.add("Kernel_Library", "sceKernelUnlockLwMutex", [](Runtime &rt, AllegrexContext &ctx) {
         const std::uint32_t work_area = arg(ctx, 0);
         const std::int32_t count = as_signed(arg(ctx, 1));
@@ -1670,6 +1702,33 @@ void register_msg_pipes(HleRegistrar &hle) {
 void register_threadman(HleRegistrar &hle) {
     register_threads(hle);
     register_time(hle);
+    // This NID is imported by God Eater 2 but is not in the shared NID table
+    // in every framework revision, so bind it by its documented NID.
+    hle.bind("ThreadManForUser", 0x6652B8CAu, [](Runtime &, AllegrexContext &ctx) {
+        const std::uint32_t delay = arg(ctx, 0);
+        const std::uint32_t handler = arg(ctx, 1);
+        const std::uint32_t common = arg(ctx, 2);
+        if (handler == 0u || (handler & 3u) != 0u) {
+            kernel().finish(ctx, error::kIllegalEntry);
+            return;
+        }
+        const SceUID uid = kernel().allocate_uid();
+        const std::uint64_t now = kernel().now_us();
+        const std::uint64_t deadline = now + std::max<std::uint64_t>(delay, 215u);
+        kernel().alarms.emplace(uid, Alarm{deadline, handler, common});
+        if (trace_sync()) {
+            log_sync("SetAlarm uid=" + std::to_string(uid) + " delay_us=" + std::to_string(delay) +
+                     " handler=" + psprecomp::hex32(handler) + " common=" + psprecomp::hex32(common));
+        }
+        kernel().finish(ctx, as_unsigned(uid));
+    });
+    hle.add("ThreadManForUser", "sceKernelCancelAlarm", [](Runtime &, AllegrexContext &ctx) {
+        const SceUID uid = as_signed(arg(ctx, 0));
+        const std::uint32_t result = kernel().cancel_alarm(uid);
+        if (trace_sync()) log_sync("CancelAlarm uid=" + std::to_string(uid) +
+                                   " result=" + psprecomp::hex32(result));
+        kernel().finish(ctx, result);
+    });
     register_semaphores(hle);
     register_event_flags(hle);
     register_mutexes(hle);
