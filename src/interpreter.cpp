@@ -249,6 +249,15 @@ bool execute_simple(Runtime &rt, AllegrexContext &ctx, const DecodedInstruction 
 
     switch (d.kind) {
     case OpcodeKind::Nop: break;
+    case OpcodeKind::Break: {
+        // BREAK is a guest exception, not a harmless instruction. The current
+        // runtime has no PSP exception-vector/CP0 delivery path, so stop with
+        // the encoded break code rather than silently advancing past it.
+        const std::uint32_t break_code = (d.word >> 6u) & 0x000FFFFFu;
+        ctx.pc = pc;
+        rt.unsupported(pc, d.word, "guest BREAK exception code " + hex32(break_code));
+        return false;
+    }
     // PSP CACHE is a hint against a cache the host mapping does not have.
     case OpcodeKind::Cache: break;
     case OpcodeKind::Sync: memory.memory_barrier(); break;
