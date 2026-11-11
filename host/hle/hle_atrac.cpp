@@ -1039,9 +1039,9 @@ bool atrac_sas_enqueue(psprecomp::GuestMemory &memory, std::uint32_t guest_conte
     for (auto &entry : contexts()) {
         if (!entry || entry->guest_context_address != guest_context) continue;
         AtracContext &context = *entry;
-        if (!context.loaded || !context.streaming || size == 0u ||
-            !memory.contains(address, size) || context.cursor >= context.track.file_size)
-            return false;
+        if (!context.loaded || size == 0u) return false;
+        if (!context.streaming) return true; // the complete file is already resident
+        if (!memory.contains(address, size) || context.cursor >= context.track.file_size) return false;
         const std::uint32_t accepted = std::min(size, context.track.file_size - context.cursor);
         store_added(memory, context, address, accepted);
         sync_guest_context(memory, context);
