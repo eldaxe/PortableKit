@@ -91,3 +91,22 @@ Reference behavior: PPSSPP `Core/HLE/sceSas.cpp`, `AtracBase.h`,
 `AtracCtx2.h/.cpp`, and `sceAtrac.cpp`. These are behavioral references;
 do not copy their GPL implementation into PortableKit without a deliberate
 licensing decision.
+
+## Work in progress: guest context allocation scaffold
+
+Commit `5981e163e163ade7331e42a06cd9b834b05cd3d9` adds a first scaffold in
+`host/hle/hle_atrac.cpp`:
+
+- Each loaded ATRAC ID can allocate an aligned 256-byte guest block.
+- `_sceAtracGetContextAddress` returns that block.
+- The 128-byte `SceAtracIdInfo` portion is populated with the basic track,
+  codec, buffer and position fields.
+- Replacing an ATRAC ID preserves its context allocation; releasing the ID
+  frees it.
+
+This is **not yet the completed SAS bridge**. The guest context is currently
+a partial mirror, not a fully synchronized hardware context. In particular,
+streaming updates and decode-position changes are not all mirrored yet;
+the second-buffer handoff is not implemented; SAS does not yet own an ATRAC
+source callback; and the three SAS ATRAC NIDs remain unregistered. Treat this
+commit as an intermediate scaffold only, not as runtime-ready support.
