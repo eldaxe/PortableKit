@@ -18,6 +18,7 @@
 #include <cstring>
 #include <ctime>
 #include <iostream>
+#include <map>
 #include <set>
 #include <string>
 
@@ -36,6 +37,30 @@ std::uint64_t boot_unix_us() {
 std::uint64_t guest_unix_us() { return boot_unix_us() + kernel().now_us(); }
 
 void success(Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, 0u); }
+
+struct LoadedModule {
+    std::string name;
+    std::string path;
+};
+constexpr std::uint32_t kMainModuleId = 0x01000001u;
+std::map<std::uint32_t, LoadedModule> &loaded_modules() {
+    static std::map<std::uint32_t, LoadedModule> modules{
+        {kMainModuleId, {"GOD EATER BURST", "disc0:/PSP_GAME/SYSDIR/EBOOT.BIN"}}
+    };
+    return modules;
+}
+struct NpDrmState {
+    std::array<std::uint8_t, 16> licensee_key{};
+    bool licensee_key_set{};
+};
+NpDrmState &npdrm_state() {
+    static NpDrmState state;
+    return state;
+}
+constexpr std::uint32_t kNpDrmNoKey = 0x80550916u;
+constexpr std::uint32_t kNpDrmInvalidFile = 0x80550901u;
+constexpr std::uint32_t kNpDrmInternalError = 0x80550902u;
+constexpr std::uint32_t kNpDrmNoFilenameMatch = 0x80550917u;
 
 // sceMd5's guest context is the PSPSDK SceKernelUtilsMd5Context layout:
 // h[4], pad, remains, computed, total length, then a 64-byte block buffer.
@@ -268,57 +293,134 @@ void register_process(HleRegistrar &hle) {
     hle.add("StdioForUser", "sceKernelStdout", [](Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, 1u); });
     hle.add("StdioForUser", "sceKernelStderr", [](Runtime &, AllegrexContext &ctx) { kernel().finish(ctx, 2u); });
 
-    // The main executable is the only module; overlays are loaded by game code.
-    constexpr std::uint32_t kMainModuleId = 0x01000001u;
+    // The main executable and stock PRX modules exposed through this HLE.
     hle.add("ModuleMgrForUser", "sceKernelGetModuleId", [](Runtime &, AllegrexContext &ctx) {
         kernel().finish(ctx, kMainModuleId);
     });
     hle.add("ModuleMgrForUser", "sceKernelGetModuleIdByAddress", [](Runtime &, AllegrexContext &ctx) {
+        // Until separately loaded PRX images are mapped, only the main image has
+        // a meaningful address range in this runtime.
+        (void)arg(ctx, 0);
         kernel().finish(ctx, kMainModuleId);
     });
-    // Games load Sony's stock modules (font, codecs) as encrypted PRX blobs from
-    // the disc. Their exports are served by this profile's HLE, so the load is
-    // acknowledged with a module id and the image itself is never touched.
-    // The name logged is the one in the module's "~PSP" header.
-    const auto load_stock_module = [](AllegrexContext &ctx, const std::uint8_t *header, std::size_t count,
-                                      const std::string &where) {
-        std::string name = "unknown";
+    const auto load_stock_module = [](AllegrexContext &ctx, const std::uint8_t *header,
+                                      std::size_t count, const std::string &path) {
+        if (count == 0u) {
+            kernel().finish(ctx, 0x80020148u); // invalid module image
+            return;
+        }
+        std::string name;
         for (std::size_t i = 0; i + 0x2Au < count; ++i) {
             if (std::memcmp(header + i, "~PSP", 4u) != 0) continue;
-            const char *text = reinterpret_cast<const char *>(header + i + 0x0Au);
-            name.assign(text, strnlen(text, 28u));
+            const char *module_name = reinterpret_cast<const char *>(header + i + 0x0Au);
+            name.assign(module_name, strnlen(module_name, 28u));
             break;
         }
+        if (name.empty()) name = path;
         const auto uid = static_cast<std::uint32_t>(kernel().allocate_uid());
-        log_once("module:" + name, "[module] loaded stock module " + name + where + " (HLE)");
+        loaded_modules()[uid] = LoadedModule{name, path};
+        log_once("module:" + name, "[module] registered stock module " + name + " from " + path +
+                                      " (HLE metadata only; PRX code is not mapped)");
         kernel().finish(ctx, uid);
     };
-    hle.add("ModuleMgrForUser", "sceKernelLoadModuleByID", [load_stock_module](Runtime &, AllegrexContext &ctx) {
-        std::array<std::uint8_t, 0x100> header{};
-        const std::size_t count = read_open_file(arg(ctx, 0), 0u, header.data(), header.size());
-        load_stock_module(ctx, header.data(), count, "");
-    });
-    // The same by path. A path that does not open fails the way sceIoOpen
-    // would have.
-    hle.add("ModuleMgrForUser", "sceKernelLoadModule", [load_stock_module](Runtime &rt, AllegrexContext &ctx) {
+    const auto load_module_path = [load_stock_module](Runtime &rt, AllegrexContext &ctx) {
         const std::string path = read_cstring(rt.memory(), arg(ctx, 0), 256u);
         std::array<std::uint8_t, 0x100> header{};
         const std::int64_t count = read_guest_file(path, 0u, header.data(), header.size());
         if (count < 0) {
-            std::cerr << "[module] cannot load " << path << ": " << psprecomp::hex32(static_cast<std::uint32_t>(count))
-                      << "\n";
             kernel().finish(ctx, static_cast<std::uint32_t>(count));
             return;
         }
-        load_stock_module(ctx, header.data(), static_cast<std::size_t>(count), " from " + path);
+        load_stock_module(ctx, header.data(), static_cast<std::size_t>(count), path);
+    };
+    hle.add("ModuleMgrForUser", "sceKernelLoadModule", load_module_path);
+    hle.add("ModuleMgrForUser", "sceKernelLoadModuleNpDrm", load_module_path);
+    hle.add("ModuleMgrForUser", "sceKernelLoadModuleByID", [load_stock_module](Runtime &, AllegrexContext &ctx) {
+        const auto size = open_file_size(arg(ctx, 0));
+        if (!size) {
+            kernel().finish(ctx, 0x80010009u); // bad file descriptor
+            return;
+        }
+        std::array<std::uint8_t, 0x100> header{};
+        const std::size_t count = read_open_file(arg(ctx, 0), 0u, header.data(), header.size());
+        load_stock_module(ctx, header.data(), count, "fd:" + std::to_string(arg(ctx, 0)));
     });
-    for (const char *name : {"sceKernelStartModule", "sceKernelStopModule", "sceKernelUnloadModule"}) {
-        hle.add("ModuleMgrForUser", name, [name](Runtime &, AllegrexContext &ctx) {
-            log_once(std::string("module-op:") + name, std::string("[module] ") + name);
-            // sceKernelStartModule returns the module id it was given.
-            kernel().finish(ctx, arg(ctx, 0));
-        });
-    }
+    hle.add("ModuleMgrForUser", "sceKernelGetModuleIdList", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t buffer = arg(ctx, 0), buffer_size = arg(ctx, 1), count_out = arg(ctx, 2);
+        if (buffer == 0u || count_out == 0u || !rt.memory().contains(count_out, 4u) ||
+            (buffer_size != 0u && !rt.memory().contains(buffer, buffer_size))) {
+            kernel().finish(ctx, error::kIllegalArgument);
+            return;
+        }
+        std::uint32_t count = 0u, written = 0u;
+        for (const auto &[uid, module] : loaded_modules()) {
+            (void)module;
+            if (written + 4u <= buffer_size) {
+                rt.memory().store32(buffer + written, uid);
+                written += 4u;
+            }
+            ++count;
+        }
+        rt.memory().store32(count_out, count);
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("ModuleMgrForUser", "sceKernelQueryModuleInfo", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t uid = arg(ctx, 0), info = arg(ctx, 1);
+        if (info == 0u || !rt.memory().contains(info, 0x40u)) {
+            kernel().finish(ctx, error::kIllegalArgument);
+            return;
+        }
+        const auto found = loaded_modules().find(uid);
+        if (found == loaded_modules().end()) {
+            kernel().finish(ctx, error::kUnknownUid);
+            return;
+        }
+        const std::uint32_t size = rt.memory().load32(info);
+        if (size != 0x40u && size != 0x60u) {
+            kernel().finish(ctx, error::kIllegalArgument);
+            return;
+        }
+        // Segment and entry information is deliberately zero: the HLE module
+        // is registered for imports, but its encrypted PRX image is not mapped.
+        for (std::uint32_t offset = 4u; offset < std::min(size, 0x60u); offset += 4u)
+            rt.memory().store32(info + offset, 0u);
+        rt.memory().store32(info, size);
+        rt.memory().store8(info + 4u, 0u); // nsegment
+        if (size == 0x60u) {
+            const std::string &name = found->second.name;
+            write_cstring(rt.memory(), info + 0x44u, name, 28u);
+        }
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("ModuleMgrForUser", "sceKernelStartModule", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t uid = arg(ctx, 0), status = arg(ctx, 3);
+        if (!loaded_modules().contains(uid)) {
+            kernel().finish(ctx, error::kUnknownUid);
+            return;
+        }
+        if (status != 0u && rt.memory().contains(status, 4u)) rt.memory().store32(status, 0u);
+        log_once("module-start:" + std::to_string(uid),
+                 "[module] start requested for HLE metadata module " + loaded_modules().at(uid).name +
+                 "; no module_start code is mapped");
+        kernel().finish(ctx, uid);
+    });
+    hle.add("ModuleMgrForUser", "sceKernelStopModule", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t uid = arg(ctx, 0), status = arg(ctx, 3);
+        if (!loaded_modules().contains(uid)) {
+            kernel().finish(ctx, error::kUnknownUid);
+            return;
+        }
+        if (status != 0u && rt.memory().contains(status, 4u)) rt.memory().store32(status, 0u);
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("ModuleMgrForUser", "sceKernelUnloadModule", [](Runtime &, AllegrexContext &ctx) {
+        const std::uint32_t uid = arg(ctx, 0);
+        if (uid == kMainModuleId || loaded_modules().erase(uid) == 0u) {
+            kernel().finish(ctx, error::kUnknownUid);
+            return;
+        }
+        kernel().finish(ctx, 0u);
+    });
     hle.add("ModuleMgrForUser", "sceKernelStopUnloadSelfModuleWithStatus", [](Runtime &, AllegrexContext &ctx) {
         kernel().exit_current_thread(ctx, static_cast<std::int32_t>(arg(ctx, 1)), true);
     });
@@ -422,13 +524,64 @@ void register_platform(HleRegistrar &hle) {
     hle.add("sceSuspendForUser", "sceKernelPowerUnlock", success);
     // A disc game's licensee key and a PSN title's data key: nothing here
     // decrypts with them yet. Chinatown Wars imports both.
-    hle.add("scePspNpDrm_user", "sceNpDrmSetLicenseeKey", [](Runtime &, AllegrexContext &ctx) {
-        log_once("npdrm-licensee", "[npdrm] sceNpDrmSetLicenseeKey (UNVERIFIED: no game traced yet)");
+    hle.add("scePspNpDrm_user", "sceNpDrmSetLicenseeKey", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t address = arg(ctx, 0);
+        if (address == 0u || !rt.memory().contains(address, 16u)) {
+            kernel().finish(ctx, error::kIllegalArgument);
+            return;
+        }
+        auto &state = npdrm_state();
+        for (std::uint32_t i = 0; i < 16u; ++i) state.licensee_key[i] = rt.memory().load8(address + i);
+        state.licensee_key_set = true;
         kernel().finish(ctx, 0u);
     });
-    hle.add("scePspNpDrm_user", "sceNpDrmEdataSetupKey", [](Runtime &, AllegrexContext &ctx) {
-        log_once("npdrm-edata", "[npdrm] sceNpDrmEdataSetupKey (UNVERIFIED: no game traced yet)");
-        kernel().finish(ctx, 0u);
+    hle.add("scePspNpDrm_user", "sceNpDrmRenameCheck", [](Runtime &rt, AllegrexContext &ctx) {
+        if (!npdrm_state().licensee_key_set) {
+            kernel().finish(ctx, kNpDrmNoKey);
+            return;
+        }
+        const std::string path = read_cstring(rt.memory(), arg(ctx, 0), 512u);
+        std::array<std::uint8_t, 8> magic{};
+        const std::int64_t count = read_guest_file(path, 0u, magic.data(), magic.size());
+        if (count < 0) {
+            kernel().finish(ctx, kNpDrmInvalidFile);
+            return;
+        }
+        // The full EDAT filename/hash verification is not implemented yet.
+        // Plain files are accepted; encrypted EDATs must not be reported as
+        // cryptographically verified by this compatibility handler.
+        const bool edat = count == 8 && magic[0] == 0u && magic[1] == 'P' &&
+                          magic[2] == 'S' && magic[3] == 'P' &&
+                          magic[4] == 'E' && magic[5] == 'D' && magic[6] == 'A' && magic[7] == 'T';
+        kernel().finish(ctx, edat ? kNpDrmNoFilenameMatch : 0u);
+    });
+    hle.add("scePspNpDrm_user", "sceNpDrmEdataSetupKey", [](Runtime &rt, AllegrexContext &ctx) {
+        if (!npdrm_state().licensee_key_set) {
+            kernel().finish(ctx, kNpDrmNoKey);
+            return;
+        }
+        const auto size = open_file_size(arg(ctx, 0));
+        if (!size) {
+            kernel().finish(ctx, kNpDrmInvalidFile);
+            return;
+        }
+        std::array<std::uint8_t, 8> magic{};
+        const std::size_t count = read_open_file(arg(ctx, 0), 0u, magic.data(), magic.size());
+        const bool edat = count == 8 && magic[0] == 0u && magic[1] == 'P' &&
+                          magic[2] == 'S' && magic[3] == 'P' &&
+                          magic[4] == 'E' && magic[5] == 'D' && magic[6] == 'A' && magic[7] == 'T';
+        // Plain file descriptors need no EDAT filter. Encrypted content needs
+        // the EDAT/PGD crypto path, so fail explicitly instead of returning a
+        // false success and handing encrypted bytes to the game.
+        kernel().finish(ctx, edat ? kNpDrmInternalError : 0u);
+    });
+    hle.add("scePspNpDrm_user", "sceNpDrmEdataGetDataSize", [](Runtime &, AllegrexContext &ctx) {
+        const auto size = open_file_size(arg(ctx, 0));
+        if (!size || *size > 0x7FFFFFFFu) {
+            kernel().finish(ctx, size ? error::kIllegalArgument : kNpDrmInvalidFile);
+            return;
+        }
+        kernel().finish(ctx, static_cast<std::uint32_t>(*size));
     });
     hle.add("sceImpose", "sceImposeSetLanguageMode", [](Runtime &, AllegrexContext &ctx) {
         if (trace_system_params())
