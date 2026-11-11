@@ -109,9 +109,10 @@ The branch now contains a first end-to-end source bridge:
   `AtracDecoder`; it does not feed ATRAC bytes into the VAG ADPCM decoder.
   The source is downmixed to mono before the existing SAS pan/volume stage.
 - `__sceSasConcatenateATRAC3` appends guest-supplied bytes to the same host
-  stream. When the SAS reader reaches unavailable streamed data while more
-  file bytes remain, the guest context's `secondBuffer` is set to
-  `0xFFFFFFFF`; a successful concatenate clears that request. Unset clears
+  stream. When a streamed SAS source has at most two buffered encoded frames left,
+  the guest context's `secondBuffer` is set to `0xFFFFFFFF` ahead of the
+  underrun; a successful concatenate clears that request. A true underrun
+  also raises the request if more file bytes remain. Unset clears
   the SAS core pointer and restores the ATRAC context's non-SAS state.
 
 ### Important limitations and verification
