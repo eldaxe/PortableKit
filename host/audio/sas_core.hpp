@@ -30,8 +30,8 @@ struct SasVoice {
     // stereo samples and optional stream-buffer enqueues through these hooks.
     bool atrac3{};
     bool source_waiting{};
-    std::function<int(const psprecomp::GuestMemory &, std::int16_t &, std::int16_t &)> atrac_read;
-    std::function<bool(const psprecomp::GuestMemory &, std::uint32_t, std::uint32_t)> atrac_enqueue;
+    std::function<int(psprecomp::GuestMemory &, std::int16_t &, std::int16_t &)> atrac_read;
+    std::function<bool(psprecomp::GuestMemory &, std::uint32_t, std::uint32_t)> atrac_enqueue;
     std::uint32_t noise_clock{};
     std::int32_t noise_timer{};
     std::uint16_t noise_register{1u};
@@ -127,10 +127,10 @@ public:
     [[nodiscard]] std::uint32_t pause_flags() const noexcept;
 
     // Renders `frames` stereo frames into `output`, overwriting it.
-    void render(const psprecomp::GuestMemory &memory, std::int16_t *output, std::size_t frames);
+    void render(psprecomp::GuestMemory &memory, std::int16_t *output, std::size_t frames);
 
 private:
-    void advance_source(const psprecomp::GuestMemory &memory, SasVoice &voice);
+    void advance_source(psprecomp::GuestMemory &memory, SasVoice &voice);
     void decode_block(const psprecomp::GuestMemory &memory, SasVoice &voice);
     void step_envelope(SasVoice &voice);
     void step_explicit_envelope(SasVoice &voice);
