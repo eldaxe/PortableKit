@@ -1030,6 +1030,7 @@ bool Kernel::begin_pending_interrupt(AllegrexContext &ctx) {
         call = std::move(pending_interrupts_.front());
         pending_interrupts_.pop_front();
         if (!call.is_valid || call.is_valid()) break;
+        call.function = 0u;
     }
     if (call.function == 0u) return false;
     interrupt_active_ = true;
