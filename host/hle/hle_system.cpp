@@ -60,7 +60,6 @@ NpDrmState &npdrm_state() {
 constexpr std::uint32_t kNpDrmNoKey = 0x80550916u;
 constexpr std::uint32_t kNpDrmInvalidFile = 0x80550901u;
 constexpr std::uint32_t kNpDrmInternalError = 0x80550902u;
-constexpr std::uint32_t kNpDrmNoFilenameMatch = 0x80550917u;
 
 // sceMd5's guest context is the PSPSDK SceKernelUtilsMd5Context layout:
 // h[4], pad, remains, computed, total length, then a 64-byte block buffer.
