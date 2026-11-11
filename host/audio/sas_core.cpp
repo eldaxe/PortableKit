@@ -352,9 +352,10 @@ void SasCore::set_pause(std::uint32_t mask, bool paused) {
         if ((mask & (1u << voice)) != 0u) voices_[voice].paused = paused;
 }
 
-void SasCore::key_on(std::uint32_t voice) {
-    if (voice >= kSasMaxVoices) return;
+std::uint32_t SasCore::key_on(std::uint32_t voice) {
+    if (voice >= kSasMaxVoices) return 0x80420010u;
     SasVoice &v = voices_[voice];
+    if (v.paused || v.playing) return 0x80420016u;
     v.block = 0u;
     v.loop_block = 0u;
     v.index = 28;
@@ -363,10 +364,7 @@ void SasCore::key_on(std::uint32_t voice) {
     v.history2 = 0;
     v.previous = 0;
     v.current = 0;
-    v.previous_right = 0;
-    v.current_right = 0;
-    v.source_waiting = false;
-    v.source_ended = !v.noise && !v.atrac3 && (v.address == 0u || v.size < (v.pcm ? 2u : 16u));
+    v.source_ended = !v.noise && (v.address == 0u || v.size < (v.pcm ? 2u : 16u));
     v.noise_timer = 0;
     v.primed = false;
     v.paused = false;
@@ -384,12 +382,13 @@ void SasCore::key_on(std::uint32_t voice) {
         v.stage = EnvelopeStage::Sustain;
         v.envelope = kEnvelopeMax;
     }
+    return 0u;
 }
 
-void SasCore::key_off(std::uint32_t voice) {
-    if (voice >= kSasMaxVoices) return;
+std::uint32_t SasCore::key_off(std::uint32_t voice) {
+    if (voice >= kSasMaxVoices) return 0x80420010u;
     SasVoice &v = voices_[voice];
-    if (!v.playing) return;
+    if (v.paused || !v.playing) return 0x80420016u;
     if ((v.have_adsr || v.explicit_envelope) && !envelopes_disabled()) {
         v.stage = EnvelopeStage::Release;
         v.envelope_counter = 0;
@@ -398,6 +397,7 @@ void SasCore::key_off(std::uint32_t voice) {
         v.stage = EnvelopeStage::Off;
         v.envelope = 0;
     }
+    return 0u;
 }
 
 std::uint32_t SasCore::end_flag() const noexcept {
