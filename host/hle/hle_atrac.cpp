@@ -118,6 +118,7 @@ struct AtracContext {
     std::uint32_t codec_type{0x1000u};
     bool low_level{};
     bool sas_bound{};
+    bool sas_needs_data{};
     std::uint32_t low_level_frame_bytes{};
     std::uint32_t low_level_out_channels{2u};
 
@@ -323,7 +324,7 @@ void sync_guest_context(psprecomp::GuestMemory &memory, AtracContext &context) {
            (current_frame_offset(context) - track.data_offset) % ring_bytes : 0u); // streamOff
     put32(52u, 0u);                                                 // secondStreamOff
     put32(56u, context.buffer);                                    // buffer
-    put32(60u, 0u);                                                // secondBuffer
+    put32(60u, context.sas_needs_data ? 0xFFFFFFFFu : 0u);          // secondBuffer SAS refill handshake
     put32(64u, context.buffer_size);                               // bufferByte
     put32(68u, 0u);                                                 // secondBufferByte
 }
@@ -1034,7 +1035,14 @@ int atrac_sas_read(psprecomp::GuestMemory &memory, std::uint32_t guest_context,
     const std::int64_t decoded_index = static_cast<std::int64_t>(context->position) + track.skip;
     const std::int64_t frame = decoded_index / frame_samples;
     const std::int64_t first = decoded_index % frame_samples;
-    if (!load_frame(memory, *context, frame)) return context->streaming ? -1 : 1;
+    if (!load_frame(memory, *context, frame)) {
+        if (context->streaming && context->cursor < track.file_size) {
+            context->sas_needs_data = true;
+            sync_guest_context(memory, *context);
+            return -1;
+        }
+        return context->streaming ? 0 : 1;
+    }
     const std::size_t sample_index = static_cast<std::size_t>(first) * 2u;
     // sceAtrac's SAS handoff switches its output to one channel; SAS
     // applies the per-voice left/right volume after decoding.
@@ -1063,6 +1071,7 @@ bool atrac_sas_enqueue(psprecomp::GuestMemory &memory, std::uint32_t guest_conte
         if (!memory.contains(address, size) || context.cursor >= context.track.file_size) return false;
         const std::uint32_t accepted = std::min(size, context.track.file_size - context.cursor);
         store_added(memory, context, address, accepted);
+        context.sas_needs_data = false;
         sync_guest_context(memory, context);
         return accepted == size;
     }
