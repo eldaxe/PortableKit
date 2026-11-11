@@ -118,6 +118,11 @@ struct AtracContext {
     bool low_level{};
     std::uint32_t low_level_frame_bytes{};
     std::uint32_t low_level_out_channels{2u};
+
+    // The guest-visible 256-byte SceAtracContext returned by
+    // _sceAtracGetContextAddress. Host decoder state remains in this object.
+    std::int32_t guest_context_uid{-1};
+    std::uint32_t guest_context_address{};
 };
 
 std::array<std::unique_ptr<AtracContext>, kMaxAtracIds> &contexts() {
@@ -273,8 +278,64 @@ bool load_frame(const psprecomp::GuestMemory &memory, AtracContext &context, std
     return decoded;
 }
 
+// SceAtracContext is 128 bytes of codec state followed by the 128-byte
+// SceAtracIdInfo. Keep the guest-visible fields in sync without exposing the
+// host FFmpeg decoder or its private state.
+void sync_guest_context(psprecomp::GuestMemory &memory, AtracContext &context) {
+    const std::uint32_t base = context.guest_context_address;
+    if (base == 0u || !memory.contains(base, 256u) || !context.loaded) return;
+    const TrackInfo &track = context.track;
+    const std::uint32_t info = base + 128u;
+    const auto put32 = [&](std::uint32_t offset, std::uint32_t value) { memory.store32(info + offset, value); };
+    put32(0u, static_cast<std::uint32_t>(context.position));       // decodePos
+    put32(4u, static_cast<std::uint32_t>(track.end_sample));       // endSample
+    put32(8u, static_cast<std::uint32_t>(track.loop_start));       // loopStart
+    put32(12u, static_cast<std::uint32_t>(track.loop_end));        // loopEnd
+    put32(16u, track.skip);                                        // firstValidSample
+    memory.store8(info + 20u, 0u);                                 // numSkipFrames
+    memory.store8(info + 21u, context.streaming ? 4u : 2u);       // state
+    memory.store8(info + 22u, 0u);                                 // curBuffer
+    memory.store8(info + 23u, static_cast<std::uint8_t>(track.channels)); // numChan
+    memory.store16(info + 24u, static_cast<std::uint16_t>(track.block_align)); // sampleSize
+    memory.store16(info + 26u, context.codec_type == 0x1001u ? 0x1001u :
+                   (track.codec == audio::AtracCodec::Atrac3 ? 0x1001u : 0x1000u)); // codec
+    put32(28u, track.data_offset);                                 // dataOff
+    put32(32u, current_frame_offset(context));                     // curFileOff
+    put32(36u, track.file_size);                                   // fileDataEnd
+    put32(40u, static_cast<std::uint32_t>(context.loop_num));      // loopNum
+    put32(44u, static_cast<std::uint32_t>(context.stored.size())); // streamDataByte
+    put32(48u, 0u);                                                 // streamOff
+    put32(52u, 0u);                                                 // secondStreamOff
+    put32(56u, context.buffer);                                    // buffer
+    put32(60u, 0xFFFFFFFFu);                                       // secondBuffer: SAS may enqueue
+    put32(64u, context.buffer_size);                               // bufferByte
+    put32(68u, 0u);                                                 // secondBufferByte
+}
+
+bool ensure_guest_context(psprecomp::GuestMemory &memory, AtracContext &context) {
+    if (context.guest_context_address != 0u && memory.contains(context.guest_context_address, 256u)) {
+        sync_guest_context(memory, context);
+        return true;
+    }
+    const std::int32_t uid = kernel().allocate_block("ATRAC context", 4u, 256u, 16u);
+    if (uid < 0) return false;
+    const MemoryBlock *block = kernel().find_block(uid);
+    if (block == nullptr || !memory.contains(block->address, 256u)) {
+        (void)kernel().free_block(uid);
+        return false;
+    }
+    context.guest_context_uid = uid;
+    context.guest_context_address = block->address;
+    for (std::uint32_t i = 0; i < 256u; ++i) memory.store8(block->address + i, 0u);
+    sync_guest_context(memory, context);
+    return true;
+}
+
 void release_context(std::uint32_t id) {
-    if (id < kMaxAtracIds) contexts()[id].reset();
+    if (id >= kMaxAtracIds || !contexts()[id]) return;
+    if (contexts()[id]->guest_context_uid >= 0)
+        (void)kernel().free_block(contexts()[id]->guest_context_uid);
+    contexts()[id].reset();
 }
 
 // The file offset of the frame the next DecodeData starts in.
@@ -413,7 +474,7 @@ struct LoadResult {
 // Reads the header, opens the decoder and puts the track in slot `id`, or in
 // the first free one. `streaming`: only `read_size` bytes of the file are in
 // the buffer yet; otherwise all of it that ever will be.
-LoadResult load_track(const psprecomp::GuestMemory &memory, std::optional<std::uint32_t> id, std::uint32_t buffer,
+LoadResult load_track(psprecomp::GuestMemory &memory, std::optional<std::uint32_t> id, std::uint32_t buffer,
                       std::uint32_t read_size, std::uint32_t buffer_size, bool streaming) {
     auto context = std::make_unique<AtracContext>();
     if (read_size > buffer_size) return {atrac_error::kSizeTooSmall, "read size past the buffer"};
@@ -444,7 +505,13 @@ LoadResult load_track(const psprecomp::GuestMemory &memory, std::optional<std::u
             << " end=" << track.end_sample << " loop=" << track.loop_start << ".." << track.loop_end
             << " skip=" << track.skip;
     if (streaming) details << " streamed, " << read_size << " of it in a buffer of " << buffer_size;
+    if (id && table[slot]) {
+        context->guest_context_uid = table[slot]->guest_context_uid;
+        context->guest_context_address = table[slot]->guest_context_address;
+        table[slot].reset();
+    }
     table[slot] = std::move(context);
+    sync_guest_context(memory, *table[slot]);
     return {slot, details.str()};
 }
 
@@ -473,6 +540,19 @@ void register_atrac_functions(HleRegistrar &hle) {
         (*slot)->codec_type = arg(ctx, 0);
         finish_traced(ctx, "sceAtracGetAtracID", static_cast<std::uint32_t>(slot - table.begin()));
     });
+    // _sceAtracGetContextAddress(id): return the guest-visible 256-byte
+    // SceAtracContext consumed by the sceSasCore ATRAC voice functions.
+    hle.try_add("sceAtrac3plus", "_sceAtracGetContextAddress", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t id = arg(ctx, 0);
+        AtracContext *context = find_context(id);
+        if (context == nullptr || !ensure_guest_context(rt.memory(), *context)) {
+            finish_traced(ctx, "_sceAtracGetContextAddress",
+                          context == nullptr ? context_error(id) : atrac_error::kNoAtracId);
+            return;
+        }
+        finish_traced(ctx, "_sceAtracGetContextAddress", context->guest_context_address);
+    });
+
     // sceAtracSetData(id, buffer, bufferSize): SetDataAndGetID for an id
     // already handed out.
     hle.add("sceAtrac3plus", "sceAtracSetData", [](Runtime &rt, AllegrexContext &ctx) {
