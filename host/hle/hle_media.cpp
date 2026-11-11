@@ -998,15 +998,13 @@ void register_audio(HleRegistrar &hle) {
             kernel().finish(ctx, 0x80420014u); // SCE_SAS_ERROR_INVALID_PARAMETER
             return;
         }
-        const auto reader = [guest_context](const psprecomp::GuestMemory &source_memory,
+        const auto reader = [guest_context](psprecomp::GuestMemory &source_memory,
                                              std::int16_t &left, std::int16_t &right) {
-            auto &mutable_memory = const_cast<psprecomp::GuestMemory &>(source_memory);
-            return audio::atrac_sas_read(mutable_memory, guest_context, left, right);
+            return audio::atrac_sas_read(source_memory, guest_context, left, right);
         };
-        const auto enqueue = [guest_context](const psprecomp::GuestMemory &source_memory,
+        const auto enqueue = [guest_context](psprecomp::GuestMemory &source_memory,
                                               std::uint32_t address, std::uint32_t size) {
-            auto &mutable_memory = const_cast<psprecomp::GuestMemory &>(source_memory);
-            return audio::atrac_sas_enqueue(mutable_memory, guest_context, address, size);
+            return audio::atrac_sas_enqueue(source_memory, guest_context, address, size);
         };
         if (!audio::sas_core(core).set_voice_atrac3(voice, reader, enqueue)) {
             kernel().finish(ctx, 0x80420040u); // SCE_SAS_ERROR_ATRAC3_ALREADY_SET
@@ -1026,9 +1024,7 @@ void register_audio(HleRegistrar &hle) {
         }
         const bool accepted = audio::sas_core(arg(ctx, 0)).concatenate_atrac3(
             voice, rt.memory(), arg(ctx, 2), arg(ctx, 3));
-        // The PSP implementation accepts an enqueue even for an already
-        // buffered stream; a full-file context has no additional data to add.
-        kernel().finish(ctx, accepted ? 0u : 0u);
+        kernel().finish(ctx, accepted ? 0u : 0x80420041u);
     });
     hle.add("sceSasCore", "__sceSasUnsetATRAC3", [](Runtime &, AllegrexContext &ctx) {
         const std::uint32_t voice = arg(ctx, 1);
