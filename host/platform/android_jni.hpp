@@ -24,6 +24,10 @@ struct Insets {
 // Ends this process and starts the app again; returns only if it cannot.
 void relaunch();
 
+// Opens the append-only Android SAF log file for the named game folder (Sekhmet: /sdcard/sekhmet/log.txt).
+// The first call may ask the player to grant access. Returns an owned fd, or -1.
+[[nodiscard]] int open_log_file(const std::string &folder_name);
+
 // A folder the player picks, as a tree URI; nothing when cancelled.
 [[nodiscard]] std::optional<std::string> pick_folder();
 // A file the player picks to read, as a document URI; nothing when cancelled.
