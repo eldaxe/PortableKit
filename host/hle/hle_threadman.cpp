@@ -1702,33 +1702,6 @@ void register_msg_pipes(HleRegistrar &hle) {
 void register_threadman(HleRegistrar &hle) {
     register_threads(hle);
     register_time(hle);
-    // This NID is imported by God Eater 2 but is not in the shared NID table
-    // in every framework revision, so bind it by its documented NID.
-    hle.bind("ThreadManForUser", 0x6652B8CAu, [](Runtime &, AllegrexContext &ctx) {
-        const std::uint32_t delay = arg(ctx, 0);
-        const std::uint32_t handler = arg(ctx, 1);
-        const std::uint32_t common = arg(ctx, 2);
-        if (handler == 0u || (handler & 3u) != 0u) {
-            kernel().finish(ctx, error::kIllegalEntry);
-            return;
-        }
-        const SceUID uid = kernel().allocate_uid();
-        const std::uint64_t now = kernel().now_us();
-        const std::uint64_t deadline = now + std::max<std::uint64_t>(delay, 215u);
-        kernel().alarms.emplace(uid, Alarm{deadline, handler, common});
-        if (trace_sync()) {
-            log_sync("SetAlarm uid=" + std::to_string(uid) + " delay_us=" + std::to_string(delay) +
-                     " handler=" + psprecomp::hex32(handler) + " common=" + psprecomp::hex32(common));
-        }
-        kernel().finish(ctx, as_unsigned(uid));
-    });
-    hle.add("ThreadManForUser", "sceKernelCancelAlarm", [](Runtime &, AllegrexContext &ctx) {
-        const SceUID uid = as_signed(arg(ctx, 0));
-        const std::uint32_t result = kernel().cancel_alarm(uid);
-        if (trace_sync()) log_sync("CancelAlarm uid=" + std::to_string(uid) +
-                                   " result=" + psprecomp::hex32(result));
-        kernel().finish(ctx, result);
-    });
     register_semaphores(hle);
     register_event_flags(hle);
     register_mutexes(hle);
