@@ -156,8 +156,8 @@ void SasCore::set_voice_pcm(std::uint32_t voice, std::uint32_t address, std::uin
 
 bool SasCore::set_voice_atrac3(
     std::uint32_t voice,
-    std::function<int(const psprecomp::GuestMemory &, std::int16_t &, std::int16_t &)> reader,
-    std::function<bool(const psprecomp::GuestMemory &, std::uint32_t, std::uint32_t)> enqueue) {
+    std::function<int(psprecomp::GuestMemory &, std::int16_t &, std::int16_t &)> reader,
+    std::function<bool(psprecomp::GuestMemory &, std::uint32_t, std::uint32_t)> enqueue) {
     if (voice >= kSasMaxVoices || !reader) return false;
     SasVoice &v = voices_[voice];
     if (v.atrac3) return false;
