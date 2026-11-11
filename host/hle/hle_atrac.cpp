@@ -15,6 +15,7 @@
 #include "hle_common.hpp"
 
 #include "audio/atrac_decoder.hpp"
+#include "audio/sas_core.hpp"
 
 #include "psprecomp/common.hpp"
 
@@ -272,6 +273,13 @@ bool load_frame(const psprecomp::GuestMemory &memory, AtracContext &context, std
             (void)decode(warm_up);
     }
     const bool decoded = decode(frame);
+    if (!decoded && context.streaming) {
+        // A SAS voice can underrun before the game enqueues the next packet.
+        // Do not cache silence: retry this exact frame after concatenation.
+        context.next_frame = -1;
+        context.cached_frame = -1;
+        return false;
+    }
     if (!decoded) std::fill(context.cached.begin(), context.cached.end(), std::int16_t{0});
     context.next_frame = frame + 1;
     context.cached_frame = frame;
@@ -296,7 +304,7 @@ void sync_guest_context(psprecomp::GuestMemory &memory, AtracContext &context) {
     put32(12u, static_cast<std::uint32_t>(track.loop_end));        // loopEnd
     put32(16u, track.skip);                                        // firstValidSample
     memory.store8(info + 20u, 0u);                                 // numSkipFrames
-    memory.store8(info + 21u, context.streaming ? 4u : 2u);       // state
+    memory.store8(info + 21u, 16u);                              // ATRAC_STATUS_FOR_SCESAS
     memory.store8(info + 22u, 0u);                                 // curBuffer
     memory.store8(info + 23u, static_cast<std::uint8_t>(track.channels)); // numChan
     memory.store16(info + 24u, static_cast<std::uint16_t>(track.block_align)); // sampleSize
@@ -310,7 +318,7 @@ void sync_guest_context(psprecomp::GuestMemory &memory, AtracContext &context) {
     put32(48u, 0u);                                                 // streamOff
     put32(52u, 0u);                                                 // secondStreamOff
     put32(56u, context.buffer);                                    // buffer
-    put32(60u, 0xFFFFFFFFu);                                       // secondBuffer: SAS may enqueue
+    put32(60u, 0u);                                                // secondBuffer
     put32(64u, context.buffer_size);                               // bufferByte
     put32(68u, 0u);                                                 // secondBufferByte
 }
@@ -990,6 +998,58 @@ void register_atrac_functions(HleRegistrar &hle) {
 }
 
 } // namespace
+
+// The SAS mixer refers to an ATRAC context by the guest address returned from
+// _sceAtracGetContextAddress. These functions keep the decoder owned by the
+// ATRAC HLE and expose only the operations the SAS voice needs.
+namespace audio {
+int atrac_sas_read(psprecomp::GuestMemory &memory, std::uint32_t guest_context,
+                   std::int16_t &left, std::int16_t &right) {
+    AtracContext *context = nullptr;
+    for (auto &entry : contexts())
+        if (entry && entry->guest_context_address == guest_context) { context = entry.get(); break; }
+    if (context == nullptr || !context->loaded) return 0;
+    TrackInfo &track = context->track;
+    if (context->position > track.end_sample) return 0;
+
+    const bool loops = looping(*context) && context->position <= track.loop_end;
+    const std::int32_t stop = loops ? track.loop_end : track.end_sample;
+    const std::int64_t frame_samples = static_cast<std::int64_t>(atrac_frame_samples(track.codec));
+    const std::int64_t decoded_index = static_cast<std::int64_t>(context->position) + track.skip;
+    const std::int64_t frame = decoded_index / frame_samples;
+    const std::int64_t first = decoded_index % frame_samples;
+    if (!load_frame(memory, *context, frame)) return context->streaming ? -1 : 1;
+    const std::size_t sample_index = static_cast<std::size_t>(first) * 2u;
+    left = context->cached[sample_index];
+    right = context->cached[sample_index + 1u];
+
+    ++context->position;
+    if (context->position > stop && loops) {
+        context->position = track.loop_start;
+        ++context->loops_done;
+        if (context->loop_num > 0) --context->loop_num;
+    }
+    if (context->streaming) trim_stored(*context);
+    sync_guest_context(memory, *context);
+    return 1;
+}
+
+bool atrac_sas_enqueue(psprecomp::GuestMemory &memory, std::uint32_t guest_context,
+                       std::uint32_t address, std::uint32_t size) {
+    for (auto &entry : contexts()) {
+        if (!entry || entry->guest_context_address != guest_context) continue;
+        AtracContext &context = *entry;
+        if (!context.loaded || !context.streaming || size == 0u ||
+            !memory.contains(address, size) || context.cursor >= context.track.file_size)
+            return false;
+        const std::uint32_t accepted = std::min(size, context.track.file_size - context.cursor);
+        store_added(memory, context, address, accepted);
+        sync_guest_context(memory, context);
+        return accepted == size;
+    }
+    return false;
+}
+} // namespace audio
 
 void register_atrac(HleRegistrar &hle) {
     if (!audio::AtracDecoder::available()) {
