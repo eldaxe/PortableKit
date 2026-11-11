@@ -205,8 +205,22 @@ bool SasCore::concatenate_atrac3(std::uint32_t voice, psprecomp::GuestMemory &me
 
 bool SasCore::unset_atrac3(std::uint32_t voice) {
     if (voice >= kSasMaxVoices || !voices_[voice].atrac3) return false;
-    voices_[voice] = {};
-    voices_[voice].index = 28;
+    SasVoice &v = voices_[voice];
+    v.atrac3 = false;
+    v.atrac_read = {};
+    v.atrac_enqueue = {};
+    v.address = 0u;
+    v.size = 0u;
+    v.playing = false;
+    v.paused = false;
+    v.source_ended = true;
+    v.source_waiting = false;
+    v.primed = false;
+    v.previous = v.current = 0;
+    v.previous_right = v.current_right = 0;
+    v.stage = EnvelopeStage::Off;
+    v.envelope = 0;
+    v.height = 0;
     return true;
 }
 
