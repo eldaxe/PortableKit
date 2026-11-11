@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 namespace portablekit::audio {
@@ -25,6 +26,12 @@ struct SasVoice {
     // A noise voice (__sceSasSetNoise) plays the output of a noise generator
     // instead of a sample, at `noise_clock` (0..63), until it is keyed off.
     bool noise{};
+    // ATRAC is decoded by the owning sceAtrac context; SAS only requests
+    // stereo samples and optional stream-buffer enqueues through these hooks.
+    bool atrac3{};
+    bool source_waiting{};
+    std::function<int(const psprecomp::GuestMemory &, std::int16_t &, std::int16_t &)> atrac_read;
+    std::function<bool(const psprecomp::GuestMemory &, std::uint32_t, std::uint32_t)> atrac_enqueue;
     std::uint32_t noise_clock{};
     std::int32_t noise_timer{};
     std::uint16_t noise_register{1u};
@@ -47,6 +54,8 @@ struct SasVoice {
     std::array<std::int16_t, 28> decoded{};
     std::int16_t previous{};
     std::int16_t current{};
+    std::int16_t previous_right{};
+    std::int16_t current_right{};
     bool source_ended{};
     bool primed{};
 
@@ -88,6 +97,13 @@ public:
 
     void set_voice(std::uint32_t voice, std::uint32_t address, std::uint32_t size, bool looping);
     void set_voice_pcm(std::uint32_t voice, std::uint32_t address, std::uint32_t size, std::int32_t loop);
+    [[nodiscard]] bool set_voice_atrac3(
+        std::uint32_t voice,
+        std::function<int(const psprecomp::GuestMemory &, std::int16_t &, std::int16_t &)> reader,
+        std::function<bool(const psprecomp::GuestMemory &, std::uint32_t, std::uint32_t)> enqueue);
+    [[nodiscard]] bool concatenate_atrac3(std::uint32_t voice, const psprecomp::GuestMemory &memory,
+                                           std::uint32_t address, std::uint32_t size);
+    [[nodiscard]] bool unset_atrac3(std::uint32_t voice);
     void set_noise(std::uint32_t voice, std::uint32_t clock);
     void set_pitch(std::uint32_t voice, std::uint32_t pitch);
     void set_volume(std::uint32_t voice, std::int32_t left, std::int32_t right);
