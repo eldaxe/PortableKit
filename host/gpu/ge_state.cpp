@@ -1002,7 +1002,27 @@ void GeState::fill_draw_state(DrawCall &call) const {
 void GeState::draw_primitive(const GuestMemory &memory, std::uint32_t data) {
     const std::uint32_t count = data & 0xFFFFu;
     const auto primitive = static_cast<PrimitiveType>((data >> 16u) & 7u);
-    if (count == 0u || vertex_address_ == 0u) return;
+    static const bool trace_ge = portablekit::env("TRACE_GE") != nullptr;
+    static std::uint64_t trace_draws = 0u;
+    const std::uint64_t trace_id = trace_ge ? trace_draws++ : 0u;
+    const bool trace_this = trace_ge && trace_id < 128u;
+    const auto trace_rejected = [&](const char *reason) {
+        if (trace_this)
+            std::cout << "[ge-draw] #" << trace_id << " rejected=" << reason << " count=" << count
+                      << " primitive=" << static_cast<std::uint32_t>(primitive) << " vtype=0x" << std::hex
+                      << vertex_type_ << " vaddr=0x" << vertex_address_ << " iaddr=0x" << index_address_
+                      << std::dec << "\\n";
+    };
+    if (trace_this)
+        std::cout << "[ge-draw] #" << trace_id << " begin count=" << count
+                  << " primitive=" << static_cast<std::uint32_t>(primitive) << " vtype=0x" << std::hex
+                  << vertex_type_ << " vaddr=0x" << vertex_address_ << " iaddr=0x" << index_address_
+                  << " target=0x" << target_.color_address << " texture=0x" << texture_.address << std::dec
+                  << "\\n";
+    if (count == 0u || vertex_address_ == 0u) {
+        trace_rejected(count == 0u ? "zero-count" : "zero-vertex-address");
+        return;
+    }
 
     const std::uint32_t index_type = (vertex_type_ >> 11u) & 3u;
     // One DrawCall is reused for every draw, so its vertex and index vectors
@@ -1023,7 +1043,7 @@ void GeState::draw_primitive(const GuestMemory &memory, std::uint32_t data) {
     if (index_type != 0u && index_address_ != 0u) {
         // A list that points its indices outside RAM is malformed; skip the draw
         // rather than faulting the whole runtime on it.
-        if (!memory.contains(index_address_, count * (index_type == 1u ? 1u : index_type == 2u ? 2u : 4u))) return;
+        if (!memory.contains(index_address_, count * (index_type == 1u ? 1u : index_type == 2u ? 2u : 4u))) { trace_rejected("index-range-outside-memory"); return; }
         const std::uint32_t index_size = index_type == 1u ? 1u : index_type == 2u ? 2u : 4u;
         // Resolve the index run once; a run that is not contiguous in host
         // memory falls back to checked loads.
@@ -1065,9 +1085,9 @@ void GeState::draw_primitive(const GuestMemory &memory, std::uint32_t data) {
     }
 
     const std::uint32_t probe = decode_vertices(memory, vertex_address_, vertex_type_, 0u, call.vertices);
-    if (probe == 0u) return;
+    if (probe == 0u) { trace_rejected("invalid-vertex-type"); return; }
     const std::uint32_t first_address = vertex_address_ + first_vertex * probe;
-    if (!memory.contains(first_address, static_cast<std::size_t>(probe) * vertex_count)) return;
+    if (!memory.contains(first_address, static_cast<std::size_t>(probe) * vertex_count)) { trace_rejected("vertex-range-outside-memory"); return; }
     call.raw_vertices = nullptr;
     call.raw_count = 0u;
     call.raw_stride = 0u;
@@ -1090,7 +1110,7 @@ void GeState::draw_primitive(const GuestMemory &memory, std::uint32_t data) {
         stride = decode_vertices(memory, first_address, vertex_type_, vertex_count, call.vertices,
                                  bone_matrices_.data());
     if (split) perf::add_split(perf::Split::Decode, perf::split_ticks() - split_start);
-    if (stride == 0u || (call.vertices.empty() && call.raw_vertices == nullptr)) return;
+    if (stride == 0u || (call.vertices.empty() && call.raw_vertices == nullptr)) { trace_rejected("decode-produced-no-vertices"); return; }
     // A prim leaves VADDR/IADDR alone but advances the pointer it consumed, so
     // a run of prims can share one setup. An indexed prim consumes indices, not
     // vertices: advancing the vertex pointer instead walked it off the mesh and
@@ -1124,6 +1144,13 @@ void GeState::draw_primitive(const GuestMemory &memory, std::uint32_t data) {
 
     ++draw_count_;
     vertex_count_ += call.raw_vertices != nullptr ? call.raw_count : call.vertices.size();
+    if (trace_this)
+        std::cout << "[ge-draw] #" << trace_id << " accepted vertices="
+                  << (call.raw_vertices != nullptr ? call.raw_count : call.vertices.size())
+                  << " stride=" << stride << " through=" << call.through
+                  << " texture_enabled=" << call.texture.enabled << " format="
+                  << static_cast<std::uint32_t>(call.texture.format) << " clear=" << call.clear_mode
+                  << " lighting=" << call.lighting_enabled << "\\n";
     if (draw_sink_) draw_sink_(call);
 }
 
