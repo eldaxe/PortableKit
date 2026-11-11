@@ -435,7 +435,7 @@ void SasCore::decode_block(const psprecomp::GuestMemory &memory, SasVoice &voice
     }
 }
 
-void SasCore::advance_source(const psprecomp::GuestMemory &memory, SasVoice &voice) {
+void SasCore::advance_source(psprecomp::GuestMemory &memory, SasVoice &voice) {
     voice.previous = voice.current;
     voice.previous_right = voice.current_right;
     if (voice.atrac3) {
@@ -605,7 +605,7 @@ void SasCore::step_envelope(SasVoice &voice) {
     }
 }
 
-void SasCore::render(const psprecomp::GuestMemory &memory, std::int16_t *output, std::size_t frames) {
+void SasCore::render(psprecomp::GuestMemory &memory, std::int16_t *output, std::size_t frames) {
     // The voices add up at full precision and the sum is clamped once, at the
     // end. Clamping after each voice made the result depend on the order of
     // the voices, and a loud voice mixed early could clip away a quieter one
