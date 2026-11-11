@@ -95,3 +95,34 @@ because the built-in MD5 handlers are already registered.
 - Capture the guest call stack and instruction context at the assertion and break.
 - Preserve raw GE command words and decode command parameters before adding handlers.
 - Keep assertion traps visible; never turn `break` into a no-op.
+
+
+## Follow-up implementation: kernel alarms and GE trace capture (2026-11-12)
+
+PortableKit's `god-eater-burst` branch now contains an initial implementation
+of the PPSSPP-referenced alarm API:
+
+- `sceKernelSetAlarm` (NID `0x6652B8CA`)
+- `sceKernelSetSysClockAlarm` (NID `0xB2C25152`)
+- `sceKernelCancelAlarm` (NID `0x7E65B999`)
+- `sceKernelReferAlarmStatus` (NID `0xDAA3F564`)
+
+Alarm deadlines use the kernel's virtual microsecond clock. Handlers are queued
+through the existing guest interrupt-call path and receive `common` in a0.
+A positive handler return schedules another firing; zero or a negative return
+ends the alarm. The first firing applies PPSSPP's documented 215 us minimum.
+Cancellation also invalidates an alarm already queued but not yet entered.
+
+The implementation is committed but has **not yet been built or run on-device**.
+The next validation must check the CI build, alarm timing/cancel/repeat behavior,
+and the exact guest call path from God Eater Burst.
+
+The ignored-GE-command report now retains up to the first four data words per
+opcode instead of only the first. This is diagnostic capture, not GE command
+implementation; do not implement the 61 opcodes until the new trace shows
+their real parameter values and usage.
+
+Allegrex BREAK remains a deliberate runtime stop. The interpreter now reports
+its encoded exception code explicitly. PortableKit does not yet implement the
+PSP CP0 exception vector, so this change is diagnostic and does not claim to
+recover from the guest assertion.
