@@ -585,6 +585,10 @@ std::optional<std::uint64_t> Kernel::next_event_us() const {
         if (timer.active && timer.handler != 0u && timer.schedule_us >= vtimer_value(timer))
             consider(now_us_ + (timer.schedule_us - vtimer_value(timer)));
     }
+    for (const auto &[uid, alarm] : alarms) {
+        (void)uid;
+        consider(alarm.deadline_us);
+    }
     return next;
 }
 
@@ -609,6 +613,33 @@ void Kernel::process_timers() {
             continue;
         }
         if (thread->wait.deadline_us && *thread->wait.deadline_us <= now_us_) finish_wait_timeout(*thread);
+    }
+    for (auto &[uid, alarm] : alarms) {
+        if (alarm.deadline_us > now_us_) continue;
+        const SceUID alarm_uid = uid;
+        const std::uint64_t scheduled = alarm.schedule_us;
+        InterruptCall call{};
+        call.function = alarm.handler;
+        call.arguments = {alarm.common, 0u, 0u, 0u};
+        call.argument_count = 1u;
+        // PSP alarm handlers return a positive microsecond delay to repeat.
+        // A zero/negative result ends the alarm. Rescheduling is based on the
+        // previous scheduled time unless that deadline is already in the past.
+        call.on_return = [alarm_uid, scheduled](std::uint32_t next_delay) {
+            auto found = kernel().alarms.find(alarm_uid);
+            if (found == kernel().alarms.end()) return;
+            if (static_cast<std::int32_t>(next_delay) <= 0) {
+                kernel().alarms.erase(found);
+                return;
+            }
+            const std::uint64_t next_deadline = scheduled + next_delay;
+            found->second.schedule_us = next_deadline;
+            found->second.deadline_us = std::max(next_deadline, kernel().now_us()) +
+                                        (next_deadline <= kernel().now_us() ? next_delay : 0u);
+        };
+        // Disarm while the guest handler is running; it can cancel itself.
+        alarm.deadline_us = UINT64_MAX;
+        queue_interrupt(std::move(call));
     }
     for (auto &[uid, timer] : vtimers) {
         if (!timer.active || timer.handler == 0u || vtimer_value(timer) < timer.schedule_us) continue;
