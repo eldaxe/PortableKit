@@ -365,7 +365,7 @@ void register_adhocctl(HleRegistrar &hle) {
         const std::uint32_t output = arg(ctx, 0);
         if (!state().ctl_initialized)
             return done(ctx, "sceNetAdhocctlGetState", 1, err::kCtlNotInitialized);
-        if (output == 0u)
+        if (output == 0u || !memory.contains(output, 4u))
             return done(ctx, "sceNetAdhocctlGetState", 1, err::kCtlInvalidArg);
         pump_events();
         // PSP states: 0 = disconnected, 1 = connected to a normal group.
@@ -378,7 +378,7 @@ void register_adhocctl(HleRegistrar &hle) {
         const std::uint32_t output = arg(ctx, 0);
         if (!state().ctl_initialized)
             return done(ctx, "sceNetAdhocctlGetParameter", 1, err::kCtlNotInitialized);
-        if (output == 0u)
+        if (output == 0u || !memory.contains(output, 148u))
             return done(ctx, "sceNetAdhocctlGetParameter", 1, err::kCtlInvalidArg);
         pump_events();
         const auto group = Client::get().group();
