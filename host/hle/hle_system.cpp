@@ -634,13 +634,29 @@ void register_platform(HleRegistrar &hle) {
         rt.memory().store32(arg(ctx, 1), value);
         kernel().finish(ctx, 0u);
     });
-    hle.add("sceUtility", "sceUtilityLoadModule", success);
+    // Firmware modules requested by the game are backed by PortableKit HLE
+    // implementations (network, SAS, ATRAC, MPEG and NPDRM). They are not
+    // Sony PRXs mapped into guest memory. Keep the compatibility return value,
+    // but make the requested IDs observable when TRACE_UTILITY_MODULES is set.
+    const auto trace_module = [](const char *operation, AllegrexContext &ctx) {
+        if (portablekit::env("TRACE_UTILITY_MODULES") != nullptr) {
+            std::cout << "[utility-module] " << operation
+                      << " id=" << psprecomp::hex32(arg(ctx, 0))
+                      << " -> 0x00000000 (HLE-backed; no PRX mapped)\\n";
+        }
+        kernel().finish(ctx, 0u);
+    };
+    hle.add("sceUtility", "sceUtilityLoadModule",
+            [](Runtime &, AllegrexContext &ctx) { trace_module("load", ctx); });
     // The dialogs themselves live in hle_utility.cpp.
-    hle.add("sceUtility", "sceUtilityUnloadModule", success);
+    hle.add("sceUtility", "sceUtilityUnloadModule",
+            [](Runtime &, AllegrexContext &ctx) { trace_module("unload", ctx); });
     // The audio and video modules (sceUtilityLoadAvModule(id)): the codecs
     // are the host's, always there.
-    hle.add("sceUtility", "sceUtilityLoadAvModule", success);
-    hle.add("sceUtility", "sceUtilityUnloadAvModule", success);
+    hle.add("sceUtility", "sceUtilityLoadAvModule",
+            [](Runtime &, AllegrexContext &ctx) { trace_module("load-av", ctx); });
+    hle.add("sceUtility", "sceUtilityUnloadAvModule",
+            [](Runtime &, AllegrexContext &ctx) { trace_module("unload-av", ctx); });
 }
 
 } // namespace
