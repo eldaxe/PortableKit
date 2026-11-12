@@ -2249,6 +2249,7 @@ void register_msg_pipes(HleRegistrar &hle) {
         }
         kernel().finish(ctx, 0u);
     });
+}
 
 void register_threadman_id_list(HleRegistrar &hle) {
     hle.add("ThreadManForUser", "sceKernelGetThreadmanIdList", [](Runtime &rt, AllegrexContext &ctx) {
