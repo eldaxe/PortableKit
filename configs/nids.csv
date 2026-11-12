@@ -614,3 +614,14 @@ ThreadManForUser,0x32BF938E,sceKernelDeleteTlspl
 ThreadManForUser,0x4A719FB2,sceKernelFreeTlspl
 Kernel_Library,0xFA835CDE,sceKernelGetTlsAddr
 SysMemUserForUser,0x35669D4C,sceKernelSetCompiledSdkVersion600_602
+sceJpeg,0xAC9E70E6,sceJpegInitMJpeg
+sceJpeg,0x9D47469C,sceJpegCreateMJpeg
+sceJpeg,0x48B602B7,sceJpegDeleteMJpeg
+sceJpeg,0x7D2F3D7F,sceJpegFinishMJpeg
+sceJpeg,0x04B93CEF,sceJpegDecodeMJpeg
+sceJpeg,0x64B6F978,sceJpegDecodeMJpegSuccessively
+sceJpeg,0x8F2BB012,sceJpegGetOutputInfo
+sceJpeg,0x91EED83C,sceJpegDecodeMJpegYCbCr
+sceJpeg,0x227662D7,sceJpegDecodeMJpegYCbCrSuccessively
+sceJpeg,0x04B5AE02,sceJpegMJpegCsc
+sceJpeg,0xA06A75C4,sceJpegMJpegCscWithColorOption
