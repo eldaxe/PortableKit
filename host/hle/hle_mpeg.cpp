@@ -829,11 +829,26 @@ void register_jpeg(HleRegistrar &hle) {
             width > found->second.width || height > found->second.height || stride < width) {
             kernel().finish(ctx, kInvalidValue); return;
         }
-        movie::Picture picture = found->second;
+        const movie::Picture &source_picture = found->second;
+        movie::Picture picture;
         picture.width = width; picture.height = height;
+        picture.full_range = source_picture.full_range;
         picture.y.resize(static_cast<std::size_t>(width) * height);
-        picture.cb.resize(static_cast<std::size_t>((width + 1u) / 2u) * ((height + 1u) / 2u));
+        const std::uint32_t source_cw = (source_picture.width + 1u) / 2u;
+        const std::uint32_t dest_cw = (width + 1u) / 2u;
+        const std::uint32_t dest_ch = (height + 1u) / 2u;
+        picture.cb.resize(static_cast<std::size_t>(dest_cw) * dest_ch);
         picture.cr.resize(picture.cb.size());
+        for (std::uint32_t row = 0; row < height; ++row)
+            std::copy_n(source_picture.y.begin() + static_cast<std::ptrdiff_t>(row) * source_picture.width,
+                        width, picture.y.begin() + static_cast<std::ptrdiff_t>(row) * width);
+        for (std::uint32_t row = 0; row < dest_ch; ++row)
+            for (std::uint32_t column = 0; column < dest_cw; ++column) {
+                const std::size_t src = static_cast<std::size_t>(row) * source_cw + column;
+                const std::size_t dst = static_cast<std::size_t>(row) * dest_cw + column;
+                picture.cb[dst] = source_picture.cb[src];
+                picture.cr[dst] = source_picture.cr[src];
+            }
         if (!write_rgba(memory, image, stride, picture)) { kernel().finish(ctx, kInvalidValue); return; }
         (void)color_option;
         kernel().finish(ctx, 0u);

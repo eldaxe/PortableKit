@@ -1,6 +1,7 @@
 #include "movie/jpeg_decoder.hpp"
 
 #include <algorithm>
+#include <climits>
 #include <cstring>
 
 #if defined(PORTABLEKIT_HAS_FFMPEG)
