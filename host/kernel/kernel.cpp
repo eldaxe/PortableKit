@@ -864,12 +864,14 @@ void Kernel::release_mailbox_waiters(SceUID uid) {
         mailbox.messages.pop_front();
         mailbox.waiters.pop_front();
         if (thread->wait.out_address != 0u) runtime_->memory().store32(thread->wait.out_address, message);
-        portablekit::log_sync("[mbx] deliver mailbox=" + std::to_string(uid) +
-                              " receiver=" + std::to_string(thread->uid) + " name=" + thread->name +
-                              " message=" + psprecomp::hex32(message) +
-                              " out=" + psprecomp::hex32(thread->wait.out_address) +
-                              " remaining_messages=" + std::to_string(mailbox.messages.size()) +
-                              " remaining_waiters=" + std::to_string(mailbox.waiters.size()));
+        if (portablekit::env("TRACE_SYNC") != nullptr) {
+            std::cerr << "[mbx] deliver mailbox=" << uid
+                      << " receiver=" << thread->uid << " name=" << thread->name
+                      << " message=" << psprecomp::hex32(message)
+                      << " out=" << psprecomp::hex32(thread->wait.out_address)
+                      << " remaining_messages=" << mailbox.messages.size()
+                      << " remaining_waiters=" << mailbox.waiters.size() << "\\n";
+        }
         wake(*thread, 0u);
     }
 }
