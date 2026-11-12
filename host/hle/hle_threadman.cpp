@@ -1138,6 +1138,33 @@ Mutex *find(std::uint32_t work_area, SceUID &uid) {
 // Mailboxes: a queue a thread can post a message pointer to and another can
 // wait on. The message itself belongs to the guest and is never touched here.
 void register_mailboxes(HleRegistrar &hle) {
+    // Keep mailbox tracing opt-in: the movie thread can receive many messages,
+    // and normal runs should not pay for or emit this diagnostic.
+    const auto describe_waiters = [](const Mailbox &mailbox) {
+        std::string result;
+        for (const SceUID uid : mailbox.waiters) {
+            if (!result.empty()) result += ",";
+            result += std::to_string(uid);
+            const Thread *thread = kernel().find_thread(uid);
+            if (thread == nullptr) {
+                result += ":missing";
+            } else {
+                result += ":" + thread->name + ":status=" +
+                          std::to_string(static_cast<unsigned>(thread->status));
+            }
+        }
+        return result.empty() ? std::string("-") : result;
+    };
+    const auto trace_mailbox = [](const std::string &event, SceUID uid, const Mailbox &mailbox) {
+        if (!trace_sync()) return;
+        std::string message = "[mbx] " + event + " uid=" + std::to_string(uid) +
+                              " name=\"" + mailbox.name + "\" messages=" +
+                              std::to_string(mailbox.messages.size()) + " waiters=" +
+                              std::to_string(mailbox.waiters.size());
+        if (!mailbox.messages.empty())
+            message += " head=" + psprecomp::hex32(mailbox.messages.front());
+        log_sync(message);
+    };
     // Ordering messages by the priority byte in the guest's own message header
     // would mean knowing that header's layout. FIFO is what this does, and it
     // says so rather than pretending.
@@ -1152,6 +1179,7 @@ void register_mailboxes(HleRegistrar &hle) {
                                          "\" asks for messages in priority order; they are delivered in the order "
                                          "they were sent");
         kernel().mailboxes[uid] = std::move(mailbox);
+        trace_mailbox("create owner=" + std::to_string(kernel().current_uid()), uid, kernel().mailboxes[uid]);
         kernel().finish(ctx, as_unsigned(uid));
     });
     hle.add("ThreadManForUser", "sceKernelDeleteMbx", [](Runtime &, AllegrexContext &ctx) {
@@ -1160,6 +1188,8 @@ void register_mailboxes(HleRegistrar &hle) {
             kernel().finish(ctx, error::kUnknownMbxid);
             return;
         }
+        trace_mailbox("delete owner=" + std::to_string(kernel().current_uid()) +
+                      " queued=" + describe_waiters(found->second), found->first, found->second);
         kernel().cancel_waiters(found->second.waiters, error::kWaitDelete);
         kernel().mailboxes.erase(found);
         kernel().finish(ctx, 0u);
@@ -1171,9 +1201,17 @@ void register_mailboxes(HleRegistrar &hle) {
             kernel().finish(ctx, error::kUnknownMbxid);
             return;
         }
-        found->second.messages.push_back(arg(ctx, 1));
+        const SceUID sender = kernel().current_uid();
+        const std::uint32_t message = arg(ctx, 1);
+        found->second.messages.push_back(message);
+        trace_mailbox("send sender=" + std::to_string(sender) + " ptr=" + psprecomp::hex32(message) +
+                      " queued=" + describe_waiters(found->second), uid, found->second);
         kernel().finish(ctx, 0u);
         kernel().release_mailbox_waiters(uid);
+        const auto after_release = kernel().mailboxes.find(uid);
+        if (after_release != kernel().mailboxes.end())
+            trace_mailbox("send-release sender=" + std::to_string(sender) +
+                          " queued=" + describe_waiters(after_release->second), uid, after_release->second);
     });
     hle.add("ThreadManForUser", "sceKernelPollMbx", [](Runtime &rt, AllegrexContext &ctx) {
         auto found = kernel().mailboxes.find(as_signed(arg(ctx, 0)));
@@ -1183,10 +1221,14 @@ void register_mailboxes(HleRegistrar &hle) {
         }
         Mailbox &mailbox = found->second;
         if (mailbox.messages.empty()) {
+            trace_mailbox("poll-empty caller=" + std::to_string(kernel().current_uid()), found->first, mailbox);
             kernel().finish(ctx, error::kMbxNoMessage);
             return;
         }
-        if (arg(ctx, 1) != 0u) rt.memory().store32(arg(ctx, 1), mailbox.messages.front());
+        const std::uint32_t message = mailbox.messages.front();
+        trace_mailbox("poll caller=" + std::to_string(kernel().current_uid()) +
+                      " ptr=" + psprecomp::hex32(message), found->first, mailbox);
+        if (arg(ctx, 1) != 0u) rt.memory().store32(arg(ctx, 1), message);
         mailbox.messages.pop_front();
         kernel().finish(ctx, 0u);
     });
@@ -1201,14 +1243,24 @@ void register_mailboxes(HleRegistrar &hle) {
             return;
         }
         Mailbox &mailbox = found->second;
+        const SceUID receiver = kernel().current_uid();
         // A thread already queued has waited longer, so it goes first.
         if (mailbox.waiters.empty() && !mailbox.messages.empty()) {
-            if (arg(ctx, 1) != 0u) rt.memory().store32(arg(ctx, 1), mailbox.messages.front());
+            const std::uint32_t message = mailbox.messages.front();
+            trace_mailbox("receive-hit receiver=" + std::to_string(receiver) +
+                          " cb=" + std::to_string(callback_aware ? 1 : 0) +
+                          " ptr=" + psprecomp::hex32(message), uid, mailbox);
+            if (arg(ctx, 1) != 0u) rt.memory().store32(arg(ctx, 1), message);
             mailbox.messages.pop_front();
             kernel().finish(ctx, 0u);
             return;
         }
-        mailbox.waiters.push_back(kernel().current_uid());
+        mailbox.waiters.push_back(receiver);
+        trace_mailbox("receive-wait receiver=" + std::to_string(receiver) +
+                      " cb=" + std::to_string(callback_aware ? 1 : 0) +
+                      " out=" + psprecomp::hex32(arg(ctx, 1)) +
+                      " timeout=" + std::to_string(arg(ctx, 2) != 0u ? rt.memory().load32(arg(ctx, 2)) : 0u),
+                      uid, mailbox);
         WaitState wait{};
         wait.type = WaitType::Mailbox;
         wait.object = uid;
