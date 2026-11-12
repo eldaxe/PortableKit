@@ -947,6 +947,47 @@ std::map<std::uint32_t, IgnoredCommand> &ignored_commands() {
 }
 } // namespace
 
+namespace {
+const char *ge_command_name(std::uint32_t command) {
+    switch (command) {
+    case 0x15: return "REGION1";
+    case 0x16: return "REGION2";
+    case 0x1C: return "DEPTHCLIPENABLE";
+    case 0x20: return "DITHERENABLE";
+    case 0x24: return "STENCILTESTENABLE";
+    case 0x25: return "ANTIALIASENABLE";
+    case 0x26: return "PATCHCULLENABLE";
+    case 0x27: return "COLORTESTENABLE";
+    case 0x28: return "LOGICOPENABLE";
+    case 0x2C: return "MORPHWEIGHT0";
+    case 0x2D: return "MORPHWEIGHT1";
+    case 0x2E: return "MORPHWEIGHT2";
+    case 0x2F: return "MORPHWEIGHT3";
+    case 0x30: return "MORPHWEIGHT4";
+    case 0x31: return "MORPHWEIGHT5";
+    case 0x32: return "MORPHWEIGHT6";
+    case 0x33: return "MORPHWEIGHT7";
+    case 0x36: return "PATCHDIVISION";
+    case 0x37: return "PATCHPRIMITIVE";
+    case 0x38: return "PATCHFACING";
+    case 0x50: return "SHADEMODE";
+    case 0xC8: return "TEXLEVEL";
+    case 0xCA: return "TEXENVCOLOR";
+    case 0xD8: return "COLORTEST";
+    case 0xD9: return "COLORREF";
+    case 0xDA: return "COLORTESTMASK";
+    case 0xDC: return "STENCILTEST";
+    case 0xDD: return "STENCILOP";
+    case 0xE2: return "DITH0";
+    case 0xE3: return "DITH1";
+    case 0xE4: return "DITH2";
+    case 0xE5: return "DITH3";
+    case 0xE6: return "LOGICOP";
+    default: return "UNKNOWN";
+    }
+}
+} // namespace
+
 void GeState::trace_unhandled(std::uint32_t command, std::uint32_t data) {
     IgnoredCommand &entry = ignored_commands()[command];
     if (entry.count < entry.first_values.size())
@@ -954,14 +995,16 @@ void GeState::trace_unhandled(std::uint32_t command, std::uint32_t data) {
     ++entry.count;
     static const bool trace = portablekit::env("TRACE_FB_TEXTURES") != nullptr;
     if (!trace || entry.count > 4u) return;
-    std::cout << "[fbtex] unhandled GE command 0x" << std::hex << command << " data=0x" << data << std::dec << "\n";
+    std::cout << "[ge] unhandled " << ge_command_name(command) << " (0x" << std::hex << command
+              << ") data=0x" << data << std::dec << "\n";
 }
 
 void GeState::report_ignored_commands() {
     if (ignored_commands().empty()) return;
     std::cout << "GE commands ignored: " << ignored_commands().size() << " distinct\n";
     for (const auto &[command, entry] : ignored_commands()) {
-        std::cout << "  0x" << std::hex << command << std::dec << " x" << entry.count << " data=";
+        std::cout << "  " << ge_command_name(command) << " (0x" << std::hex << command << std::dec
+                  << ") x" << entry.count << " data=";
         const std::size_t count = static_cast<std::size_t>(
             std::min<std::uint64_t>(entry.count, entry.first_values.size()));
         for (std::size_t i = 0; i < count; ++i) {
