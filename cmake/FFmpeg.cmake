@@ -19,7 +19,7 @@ set(PORTABLEKIT_FFMPEG_URL "https://ffmpeg.org/releases/ffmpeg-${PORTABLEKIT_FFM
 set(PORTABLEKIT_FFMPEG_SHA256 de668509caf9e35e3cd162473441fdb29538c6d96ed080292b3cf9e6fc5d558f)
 set(PORTABLEKIT_FFMPEG_SOVERSIONS avcodec 61 avutil 59)
 
-# Only what the game needs: the ATRAC3, ATRAC3plus and H.264 decoders. The host
+# Only what the game needs: ATRAC3, ATRAC3plus, H.264 and MJPEG decoders. The host
 # splits the movie streams into access units and converts pixels itself, so no
 # demuxer, parser, scaler or resampler is built. No GPL or non-free parts: the
 # result is LGPL-2.1-or-later, which the build checks.
@@ -36,7 +36,7 @@ set(PORTABLEKIT_FFMPEG_CONFIGURE_FLAGS
     --disable-network
     --disable-autodetect
     --disable-everything
-    --enable-decoder=atrac3,atrac3p,h264
+    --enable-decoder=atrac3,atrac3p,h264,mjpeg
     --disable-x86asm
     --disable-debug)
 

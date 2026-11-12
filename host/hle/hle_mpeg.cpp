@@ -18,6 +18,7 @@
 
 #include "audio/atrac_decoder.hpp"
 #include "movie/avc_decoder.hpp"
+#include "movie/jpeg_decoder.hpp"
 #include "movie/psmf_demuxer.hpp"
 
 #include "psprecomp/common.hpp"
@@ -698,28 +699,149 @@ void register_decoding(HleRegistrar &hle) {
 // sceJpegCsc(image, ycbcr, widthHeight, bufferWidth, colourInfo): converts
 // a YCbCr picture to 32-bit pixels (R, G, B, A in memory order).
 void register_jpeg(HleRegistrar &hle) {
-    hle.add("sceJpeg", "sceJpegCsc", [](Runtime &rt, AllegrexContext &ctx) {
+    constexpr std::uint32_t kInvalidData = 0x80650004u;
+    constexpr std::uint32_t kInvalidColor = 0x80650013u;
+    constexpr std::uint32_t kInvalidSize = 0x80650020u;
+    constexpr std::uint32_t kNoSoi = 0x80650023u;
+    constexpr std::uint32_t kInvalidState = 0x80650039u;
+    constexpr std::uint32_t kOutOfMemory = 0x80650041u;
+    constexpr std::uint32_t kAlreadyInit = 0x80650042u;
+    constexpr std::uint32_t kInvalidValue = 0x80650051u;
+    struct JpegState {
+        int state{}; // 0: finished, 1: initialised, 2: created
+        std::uint32_t width{}, height{};
+        movie::JpegDecoder decoder;
+    };
+    static JpegState jpeg;
+    const auto decode_input = [](Runtime &rt, AllegrexContext &ctx, movie::Picture &picture) -> std::uint32_t {
         auto &memory = rt.memory();
-        const std::uint32_t image = arg(ctx, 0);
-        const std::uint32_t source = arg(ctx, 1);
-        const std::uint32_t width = arg(ctx, 2) >> 16u;
-        const std::uint32_t height = arg(ctx, 2) & 0xFFFFu;
+        const std::uint32_t address = arg(ctx, 0), size = arg(ctx, 1);
+        if (size < 4u || !memory.contains(address, size)) return kNoSoi;
+        std::vector<std::uint8_t> bytes(size);
+        memory.copy_out(address, bytes);
+        if (bytes[0] != 0xFFu || bytes[1] != 0xD8u) return kNoSoi;
+        return jpeg.decoder.decode(bytes, picture) ? 0u : kInvalidData;
+    };
+    const auto write_rgba = [](psprecomp::GuestMemory &memory, std::uint32_t address,
+                               std::uint32_t stride, const movie::Picture &picture) -> bool {
+        if (stride < picture.width || picture.width == 0u || picture.height == 0u) return false;
+        const std::uint64_t bytes = (static_cast<std::uint64_t>(stride) * (picture.height - 1u) + picture.width) * 4u;
+        if (bytes > 0x3FFFFFFFu || !memory.contains(address, static_cast<std::uint32_t>(bytes))) return false;
+        std::vector<std::uint8_t> line(static_cast<std::size_t>(picture.width) * 4u);
+        for (std::uint32_t y = 0; y < picture.height; ++y) {
+            picture_row_to_rgba(picture, y, picture.width, line.data());
+            memory.copy_in(address + y * stride * 4u, line);
+        }
+        return true;
+    };
+    const auto write_ycbcr = [](psprecomp::GuestMemory &memory, std::uint32_t address,
+                                std::uint32_t capacity, const movie::Picture &picture) -> bool {
+        const std::uint64_t required = static_cast<std::uint64_t>(picture.y.size()) +
+                                       picture.cb.size() + picture.cr.size();
+        if (required > capacity || required > 0x3FFFFFFFu ||
+            !memory.contains(address, static_cast<std::uint32_t>(required))) return false;
+        std::uint32_t at = address;
+        memory.copy_in(at, picture.y); at += static_cast<std::uint32_t>(picture.y.size());
+        memory.copy_in(at, picture.cb); at += static_cast<std::uint32_t>(picture.cb.size());
+        memory.copy_in(at, picture.cr);
+        module().ycbcr[address] = picture;
+        return true;
+    };
+    const auto pack_size = [](const movie::Picture &picture) -> std::uint32_t {
+        const std::uint64_t size = static_cast<std::uint64_t>(picture.width) * picture.height * 3u / 2u;
+        return size <= 0x7FFFFFFFu ? static_cast<std::uint32_t>(size) : 0u;
+    };
+    hle.add("sceJpeg", "sceJpegInitMJpeg", [&jpeg](Runtime &, AllegrexContext &ctx) {
+        if (jpeg.state != 0) { kernel().finish(ctx, kAlreadyInit); return; }
+        jpeg.state = 1; jpeg.width = jpeg.height = 0;
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("sceJpeg", "sceJpegCreateMJpeg", [&jpeg](Runtime &, AllegrexContext &ctx) {
+        const std::uint32_t width = arg(ctx, 0), height = arg(ctx, 1);
+        if (jpeg.state != 1) { kernel().finish(ctx, kInvalidState); return; }
+        if (width == 0u || height == 0u || width > 1024u || height > 1024u) {
+            kernel().finish(ctx, kInvalidSize); return;
+        }
+        jpeg.width = width; jpeg.height = height; jpeg.state = 2;
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("sceJpeg", "sceJpegDeleteMJpeg", [&jpeg](Runtime &, AllegrexContext &ctx) {
+        if (jpeg.state != 2) { kernel().finish(ctx, kInvalidState); return; }
+        jpeg.state = 1;
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("sceJpeg", "sceJpegFinishMJpeg", [&jpeg](Runtime &, AllegrexContext &ctx) {
+        if (jpeg.state == 0 || jpeg.state == 2) { kernel().finish(ctx, kInvalidState); return; }
+        jpeg.state = 0; jpeg.width = jpeg.height = 0;
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("sceJpeg", "sceJpegDecodeMJpeg", [&jpeg, decode_input, write_rgba](Runtime &rt, AllegrexContext &ctx) {
+        if (jpeg.state != 2) { kernel().finish(ctx, kInvalidState); return; }
+        movie::Picture picture;
+        const std::uint32_t error = decode_input(rt, ctx, picture);
+        if (error) { kernel().finish(ctx, error); return; }
+        if (picture.width > jpeg.width || picture.height > jpeg.height) { kernel().finish(ctx, kInvalidSize); return; }
+        if (!write_rgba(rt.memory(), arg(ctx, 2), jpeg.width, picture)) { kernel().finish(ctx, kInvalidValue); return; }
+        kernel().finish(ctx, (picture.width << 16u) | picture.height);
+    });
+    hle.add("sceJpeg", "sceJpegDecodeMJpegSuccessively", [&jpeg, decode_input, write_rgba](Runtime &rt, AllegrexContext &ctx) {
+        if (jpeg.state != 2) { kernel().finish(ctx, kInvalidState); return; }
+        movie::Picture picture;
+        const std::uint32_t error = decode_input(rt, ctx, picture);
+        if (error) { kernel().finish(ctx, error); return; }
+        if (picture.width > jpeg.width || picture.height > jpeg.height) { kernel().finish(ctx, kInvalidSize); return; }
+        if (!write_rgba(rt.memory(), arg(ctx, 2), jpeg.width, picture)) { kernel().finish(ctx, kInvalidValue); return; }
+        kernel().finish(ctx, (picture.width << 16u) | picture.height);
+    });
+    hle.add("sceJpeg", "sceJpegGetOutputInfo", [decode_input, pack_size](Runtime &rt, AllegrexContext &ctx) {
+        movie::Picture picture;
+        const std::uint32_t error = decode_input(rt, ctx, picture);
+        if (error) { kernel().finish(ctx, error); return; }
+        const std::uint32_t color = arg(ctx, 2);
+        if (color && rt.memory().contains(color, 4u)) rt.memory().store32(color, 0x00020202u);
+        kernel().finish(ctx, pack_size(picture));
+    });
+    hle.add("sceJpeg", "sceJpegDecodeMJpegYCbCr", [decode_input, write_ycbcr](Runtime &rt, AllegrexContext &ctx) {
+        movie::Picture picture;
+        const std::uint32_t error = decode_input(rt, ctx, picture);
+        if (error) { kernel().finish(ctx, error); return; }
+        if (!write_ycbcr(rt.memory(), arg(ctx, 2), arg(ctx, 3), picture)) {
+            kernel().finish(ctx, kOutOfMemory); return;
+        }
+        kernel().finish(ctx, (picture.width << 16u) | picture.height);
+    });
+    hle.add("sceJpeg", "sceJpegDecodeMJpegYCbCrSuccessively", [decode_input, write_ycbcr](Runtime &rt, AllegrexContext &ctx) {
+        movie::Picture picture;
+        const std::uint32_t error = decode_input(rt, ctx, picture);
+        if (error) { kernel().finish(ctx, error); return; }
+        if (!write_ycbcr(rt.memory(), arg(ctx, 2), arg(ctx, 3), picture)) {
+            kernel().finish(ctx, kOutOfMemory); return;
+        }
+        kernel().finish(ctx, (picture.width << 16u) | picture.height);
+    });
+    const auto csc = [write_rgba](Runtime &rt, AllegrexContext &ctx, bool color_option) {
+        auto &memory = rt.memory();
+        const std::uint32_t image = arg(ctx, 0), source = arg(ctx, 1);
+        const std::uint32_t width = arg(ctx, 2) >> 16u, height = arg(ctx, 2) & 0xFFFFu;
         const std::uint32_t stride = arg(ctx, 3);
         const auto found = module().ycbcr.find(source);
-        if (found == module().ycbcr.end() || stride < width) {
-            finish_traced(ctx, "sceJpegCsc", 0u, "no picture", 5u);
-            return;
+        if (found == module().ycbcr.end() || width == 0u || height == 0u ||
+            width > found->second.width || height > found->second.height || stride < width) {
+            kernel().finish(ctx, kInvalidValue); return;
         }
-        const movie::Picture &picture = found->second;
-        const std::uint32_t rows = std::min(height, picture.height);
-        const std::uint32_t columns = std::min(width, picture.width);
-        std::vector<std::uint8_t> line(static_cast<std::size_t>(columns) * 4u);
-        for (std::uint32_t row = 0; row < rows; ++row) {
-            picture_row_to_rgba(picture, row, columns, line.data());
-            memory.copy_in(image + row * stride * 4u, line);
-        }
-        finish_traced(ctx, "sceJpegCsc", 0u, {}, 5u);
-    });
+        movie::Picture picture = found->second;
+        picture.width = width; picture.height = height;
+        picture.y.resize(static_cast<std::size_t>(width) * height);
+        picture.cb.resize(static_cast<std::size_t>((width + 1u) / 2u) * ((height + 1u) / 2u));
+        picture.cr.resize(picture.cb.size());
+        if (!write_rgba(memory, image, stride, picture)) { kernel().finish(ctx, kInvalidValue); return; }
+        (void)color_option;
+        kernel().finish(ctx, 0u);
+    };
+    hle.add("sceJpeg", "sceJpegMJpegCsc", [csc](Runtime &rt, AllegrexContext &ctx) { csc(rt, ctx, false); });
+    hle.add("sceJpeg", "sceJpegMJpegCscWithColorOption", [csc](Runtime &rt, AllegrexContext &ctx) { csc(rt, ctx, true); });
+    // Existing non-MJPEG CSC import, now shares the same decoded-picture path.
+    hle.add("sceJpeg", "sceJpegCsc", [csc](Runtime &rt, AllegrexContext &ctx) { csc(rt, ctx, false); });
 }
 
 // Movie playback without a decoder: reporting "no data" from the stream
@@ -747,6 +869,7 @@ void register_movie_skip(HleRegistrar &hle) {
 bool mpeg_active() { return !module().instances.empty(); }
 
 void register_mpeg(HleRegistrar &hle) {
+    register_jpeg(hle);
     if (!movie::AvcDecoder::available() || !audio::AtracDecoder::available()) {
         register_movie_skip(hle);
         return;
@@ -754,7 +877,6 @@ void register_mpeg(HleRegistrar &hle) {
     register_ringbuffer(hle);
     register_library(hle);
     register_decoding(hle);
-    register_jpeg(hle);
 }
 
 } // namespace portablekit
