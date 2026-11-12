@@ -1434,7 +1434,7 @@ void register_tlspls(HleRegistrar &hle) {
         pool.block_size = arg(ctx, 3);
         const std::uint32_t partition = arg(ctx, 1);
         const std::uint32_t count = ctx.gpr[8], options = ctx.gpr[9];
-        if (!pool.block_size || !count || (pool.attributes & ~kTlsplAttrHighMemory) || partition != 6u) {
+        if (!pool.block_size || !count || (pool.attributes & ~kTlsplAttrHighMemory) || partition < 1u || partition > 6u) {
             kernel().finish(ctx, error::kIllegalArgument); return;
         }
         if (options) {
