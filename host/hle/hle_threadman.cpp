@@ -52,14 +52,34 @@ void register_threads(HleRegistrar &hle) {
     });
     hle.add("ThreadManForUser", "sceKernelDeleteThread", [](Runtime &, AllegrexContext &ctx) {
         const SceUID uid = as_signed(arg(ctx, 0));
-        kernel().finish(ctx, uid == kernel().current_uid() ? error::kNotDormant
-                                                           : as_unsigned(kernel().delete_thread(uid)));
+        if (uid == kernel().current_uid()) {
+            kernel().finish(ctx, error::kNotDormant);
+            return;
+        }
+        const Thread *thread = kernel().find_thread(uid);
+        if (thread == nullptr || (thread->status != ThreadStatus::Dormant && thread->status != ThreadStatus::Dead)) {
+            kernel().finish(ctx, as_unsigned(kernel().delete_thread(uid)));
+            return;
+        }
+        kernel().dispatch_thread_event(ctx, 8u, uid,
+            [uid](AllegrexContext &returned, std::uint32_t) {
+                kernel().finish(returned, as_unsigned(kernel().delete_thread(uid)));
+            });
     });
     hle.add("ThreadManForUser", "sceKernelTerminateThread", [](Runtime &, AllegrexContext &ctx) {
         kernel().finish(ctx, as_unsigned(kernel().terminate_thread(ctx, as_signed(arg(ctx, 0)), false)));
     });
     hle.add("ThreadManForUser", "sceKernelTerminateDeleteThread", [](Runtime &, AllegrexContext &ctx) {
-        kernel().finish(ctx, as_unsigned(kernel().terminate_thread(ctx, as_signed(arg(ctx, 0)), true)));
+        const SceUID uid = as_signed(arg(ctx, 0));
+        const std::int32_t result = kernel().terminate_thread(ctx, uid, false);
+        if (result != 0) {
+            kernel().finish(ctx, as_unsigned(result));
+            return;
+        }
+        kernel().dispatch_thread_event(ctx, 8u, uid,
+            [uid](AllegrexContext &returned, std::uint32_t) {
+                kernel().finish(returned, as_unsigned(kernel().delete_thread(uid)));
+            });
     });
     const auto get_thread_id = [](Runtime &, AllegrexContext &ctx) {
         kernel().finish(ctx, as_unsigned(kernel().current_uid()));
@@ -900,8 +920,8 @@ void register_callbacks_and_timers(HleRegistrar &hle) {
         kernel().finish(ctx, 0u);
     });
 
-    // Thread event handlers. Registration/status metadata is modelled here;
-    // lifecycle callback delivery is intentionally not reported as complete yet.
+    // Thread event handlers: lifecycle callbacks are dispatched by the kernel
+    // for CREATE, START, EXIT and DELETE, with guest callbacks run in order.
     hle.add("ThreadManForUser", "sceKernelRegisterThreadEventHandler", [](Runtime &rt, AllegrexContext &ctx) {
         const std::uint32_t name_address = arg(ctx, 0);
         const SceUID thread_id = as_signed(arg(ctx, 1));
@@ -934,8 +954,9 @@ void register_callbacks_and_timers(HleRegistrar &hle) {
             return;
         }
         const SceUID uid = kernel().allocate_uid();
+        const SceUID owner_thread = thread_id == 0 ? kernel().current_uid() : thread_id;
         kernel().thread_event_handlers[uid] = ThreadEventHandler{
-            read_cstring(rt.memory(), name_address, 32u), thread_id, mask, function, common
+            read_cstring(rt.memory(), name_address, 32u), owner_thread, mask, function, common
         };
         kernel().finish(ctx, as_unsigned(uid));
     });

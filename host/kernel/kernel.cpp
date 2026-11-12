@@ -252,7 +252,15 @@ void Kernel::exit_current_thread(AllegrexContext &ctx, std::int32_t status, bool
                             other->wait.object == uid)
                             wake(*other, static_cast<std::uint32_t>(status));
                     }
-                    if (delete_thread) (void)this->delete_thread(uid);
+                    if (delete_thread) {
+                        dispatch_thread_event(returned, 8u, uid,
+                            [this, uid](AllegrexContext &after_delete_event, std::uint32_t) {
+                                (void)this->delete_thread(uid);
+                                current_uid_ = 0;
+                                schedule(after_delete_event);
+                            });
+                        return;
+                    }
                 }
                 current_uid_ = 0;
                 schedule(returned);
@@ -1097,34 +1105,33 @@ void Kernel::dispatch_thread_event(AllegrexContext &ctx, std::uint32_t event, Sc
     constexpr SceUID kAllThreads = static_cast<SceUID>(0xFFFFFFFFu);
     constexpr SceUID kKernelThreads = static_cast<SceUID>(0xFFFFFFF8u);
     constexpr SceUID kUserThreads = static_cast<SceUID>(0xFFFFFFF0u);
-    auto handlers = std::make_shared<std::vector<ThreadEventHandler>>();
+    std::vector<ThreadEventHandler> handlers;
     for (const auto &[uid, handler] : thread_event_handlers) {
         (void)uid;
         const bool selected = handler.thread_id == target ||
-            handler.thread_id == kAllThreads || handler.thread_id == kUserThreads ||
-            (handler.thread_id == 0 && target == current_uid_);
+            handler.thread_id == kAllThreads || handler.thread_id == kUserThreads;
         // This runtime currently represents game threads only; no distinct
         // kernel-thread class exists to match ALL_KERNEL.
         if (selected && (handler.mask & event) != 0u && handler.handler != 0u)
-            handlers->push_back(handler);
+            handlers.push_back(handler);
     }
-    auto index = std::make_shared<std::size_t>(0u);
-    auto next = std::make_shared<std::function<void(AllegrexContext &)>>();
-    *next = [this, handlers, index, next, on_complete = std::move(on_complete), event, target]
-            (AllegrexContext &current) mutable {
-        if (*index >= handlers->size()) {
-            if (on_complete) on_complete(current, current.gpr[2]);
-            return;
-        }
-        const ThreadEventHandler handler = (*handlers)[(*index)++];
-        GuestCallArguments args{};
-        args[0] = event;
-        args[1] = static_cast<std::uint32_t>(target);
-        args[2] = handler.common;
-        call_guest(current, handler.handler, args,
-                   [next](AllegrexContext &returned, std::uint32_t) { (*next)(returned); }, 3u);
-    };
-    (*next)(ctx);
+    GuestCallReturn chain = std::move(on_complete);
+    for (auto it = handlers.rbegin(); it != handlers.rend(); ++it) {
+        const ThreadEventHandler handler = *it;
+        GuestCallReturn previous = std::move(chain);
+        chain = [this, handler, previous = std::move(previous), event, target]
+                (AllegrexContext &current, std::uint32_t) mutable {
+            GuestCallArguments args{};
+            args[0] = event;
+            args[1] = static_cast<std::uint32_t>(target);
+            args[2] = handler.common;
+            call_guest(current, handler.handler, args,
+                       [previous](AllegrexContext &returned, std::uint32_t result) {
+                           if (previous) previous(returned, result);
+                       }, 3u);
+        };
+    }
+    if (chain) chain(ctx, ctx.gpr[2]);
 }
 
 void Kernel::call_guest(AllegrexContext &ctx, std::uint32_t function, const GuestCallArguments &arguments,
