@@ -805,7 +805,7 @@ void register_rtc_calendar(HleRegistrar &hle) {
         const std::time_t instant = static_cast<std::time_t>(unix_seconds);
         const std::tm *local_ptr = std::localtime(&instant);
         if (local_ptr == nullptr) return 0;
-        const std::tm local_copy = *local_ptr;
+        std::tm local_copy = *local_ptr;
         const std::tm *utc_ptr = std::gmtime(&instant);
         if (utc_ptr == nullptr) return 0;
         std::tm utc_copy = *utc_ptr;
