@@ -1,5 +1,6 @@
 #include "../profile.hpp"
 #include "kernel.hpp"
+#include "kernel/thread_event_dispatch.hpp"
 
 #include "kernel/fast_loading.hpp"
 #include "kernel/stall_watchdog.hpp"
@@ -1107,40 +1108,30 @@ void Kernel::dispatch_thread_event(AllegrexContext &ctx, std::uint32_t event, Sc
                                      GuestCallReturn on_complete) {
     constexpr SceUID kAllThreads = static_cast<SceUID>(0xFFFFFFFFu);
     constexpr SceUID kUserThreads = static_cast<SceUID>(0xFFFFFFF0u);
-    // Snapshot UIDs, not handler values. A callback may release itself or a
-    // later handler; a released handler must not run when its turn arrives.
-    std::vector<SceUID> handlers;
+    std::vector<SceUID> snapshot;
     for (const auto &[uid, handler] : thread_event_handlers) {
         const bool selected = handler.thread_id == target ||
             handler.thread_id == kAllThreads || handler.thread_id == kUserThreads;
         // This runtime currently represents game threads only; no distinct
         // kernel-thread class exists to match ALL_KERNEL.
         if (selected && (handler.mask & event) != 0u && handler.handler != 0u)
-            handlers.push_back(uid);
+            snapshot.push_back(uid);
     }
-    GuestCallReturn chain = std::move(on_complete);
-    for (auto it = handlers.rbegin(); it != handlers.rend(); ++it) {
-        const SceUID handler_uid = *it;
-        GuestCallReturn previous = std::move(chain);
-        chain = [this, handler_uid, previous = std::move(previous), event, target]
-                (AllegrexContext &current, std::uint32_t) mutable {
-            const auto found = thread_event_handlers.find(handler_uid);
-            if (found == thread_event_handlers.end()) {
-                if (previous) previous(current, current.gpr[2]);
-                return;
-            }
-            const ThreadEventHandler handler = found->second;
+    auto complete = [on_complete = std::move(on_complete)](AllegrexContext &returned) {
+        if (on_complete) on_complete(returned, returned.gpr[2]);
+    };
+    dispatch_thread_event_chain(thread_event_handlers, snapshot, ctx,
+        [this, event, target](AllegrexContext &current, const ThreadEventHandler &handler,
+                             std::function<void(AllegrexContext &)> next) {
             GuestCallArguments args{};
             args[0] = event;
             args[1] = static_cast<std::uint32_t>(target);
             args[2] = handler.common;
             call_guest(current, handler.handler, args,
-                       [previous](AllegrexContext &returned, std::uint32_t result) {
-                           if (previous) previous(returned, result);
-                       }, 3u);
-        };
-    }
-    if (chain) chain(ctx, ctx.gpr[2]);
+                [next = std::move(next)](AllegrexContext &returned, std::uint32_t) {
+                    if (next) next(returned);
+                }, 3u);
+        }, std::move(complete));
 }
 
 void Kernel::call_guest(AllegrexContext &ctx, std::uint32_t function, const GuestCallArguments &arguments,
