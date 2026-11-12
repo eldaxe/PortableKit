@@ -870,7 +870,7 @@ void Kernel::release_mailbox_waiters(SceUID uid) {
                       << " message=" << psprecomp::hex32(message)
                       << " out=" << psprecomp::hex32(thread->wait.out_address)
                       << " remaining_messages=" << mailbox.messages.size()
-                      << " remaining_waiters=" << mailbox.waiters.size() << "\\n";
+                      << " remaining_waiters=" << mailbox.waiters.size() << "\n";
         }
         wake(*thread, 0u);
     }
