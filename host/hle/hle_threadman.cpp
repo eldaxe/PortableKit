@@ -1376,15 +1376,17 @@ void register_lightweight_mutexes(HleRegistrar &hle) {
 // pool; slots are zeroed on allocation and release. Exhausted pools wait FIFO.
 struct Tlspl {
     std::string name;
-    std::uint32_t attributes{}, block{}, address{}, block_size{}, count{}, alignment{4u}, next{};
+    std::uint32_t attributes{}, block{}, address{}, block_size{}, count{}, alignment{4u}, next{}, index{};
     std::vector<SceUID> owners;
     std::deque<SceUID> waiters;
 };
 constexpr std::uint32_t kTlsplAttrHighMemory = 0x4000u;
-constexpr std::uint32_t kUnknownTlsplid = 0x800201BAu;
-constexpr std::uint32_t kTlsplInUse = 0x800201B9u;
+constexpr std::uint32_t kUnknownTlsplid = 0x800201D0u;
+constexpr std::uint32_t kTooManyTlspl = 0x800201D1u;
+constexpr std::uint32_t kTlsplInUse = 0x800201D2u;
 constexpr std::uint32_t kWaitDeleteTlspl = 0x800201B5u;
 std::map<SceUID, Tlspl> &tlspls() { static std::map<SceUID, Tlspl> pools; return pools; }
+std::array<bool, 16> &tlspl_indexes() { static std::array<bool, 16> indexes{}; return indexes; }
 
 std::uint32_t tls_stride(const Tlspl &pool) {
     return (pool.block_size + pool.alignment - 1u) & ~(pool.alignment - 1u);
@@ -1430,8 +1432,9 @@ void register_tlspls(HleRegistrar &hle) {
         pool.name = arg(ctx, 0) ? read_cstring(memory, arg(ctx, 0), 32u) : std::string();
         pool.attributes = arg(ctx, 2);
         pool.block_size = arg(ctx, 3);
+        const std::uint32_t partition = arg(ctx, 1);
         const std::uint32_t count = ctx.gpr[8], options = ctx.gpr[9];
-        if (!pool.block_size || !count || (pool.attributes & ~kTlsplAttrHighMemory)) {
+        if (!pool.block_size || !count || (pool.attributes & ~kTlsplAttrHighMemory) || partition != 6u) {
             kernel().finish(ctx, error::kIllegalArgument); return;
         }
         if (options) {
@@ -1449,6 +1452,10 @@ void register_tlspls(HleRegistrar &hle) {
         const std::uint64_t stride = (static_cast<std::uint64_t>(pool.block_size) + pool.alignment - 1u) & ~std::uint64_t{pool.alignment - 1u};
         const std::uint64_t bytes = stride * count;
         if (!bytes || bytes > 0xFFFFFFFFull) { kernel().finish(ctx, 0x800201B7u); return; }
+        auto &indexes = tlspl_indexes();
+        const auto index_it = std::find(indexes.begin(), indexes.end(), false);
+        if (index_it == indexes.end()) { kernel().finish(ctx, kTooManyTlspl); return; }
+        const std::uint32_t index = static_cast<std::uint32_t>(index_it - indexes.begin());
         const std::int32_t block = kernel().allocate_block("tlspl:" + pool.name,
             (pool.attributes & kTlsplAttrHighMemory) ? 1u : 0u, static_cast<std::uint32_t>(bytes), 0u);
         if (block < 0) { kernel().finish(ctx, as_unsigned(block)); return; }
@@ -1457,7 +1464,9 @@ void register_tlspls(HleRegistrar &hle) {
         pool.block = static_cast<std::uint32_t>(block);
         pool.address = memblock->address;
         pool.count = count;
+        pool.index = index;
         pool.owners.assign(count, 0);
+        indexes[index] = true;
         const SceUID uid = kernel().allocate_uid();
         tlspls().emplace(uid, std::move(pool));
         kernel().finish(ctx, as_unsigned(uid));
@@ -1470,6 +1479,7 @@ void register_tlspls(HleRegistrar &hle) {
             if (owner && owner != kernel().current_uid()) { kernel().finish(ctx, kTlsplInUse); return; }
         (void)tls_free(found->second, kernel().current_uid(), rt.memory());
         const std::uint32_t block = found->second.block;
+        tlspl_indexes()[found->second.index] = false;
         tlspls().erase(found);
         (void)kernel().free_block(static_cast<SceUID>(block));
         kernel().finish(ctx, 0u);
@@ -1497,7 +1507,7 @@ void register_tlspls(HleRegistrar &hle) {
             const Tlspl &pool = found->second;
             put(0u, kInfoSize);
             for (std::size_t i = 0; i < pool.name.size() && i < 31u; ++i) bytes[4u + i] = static_cast<std::uint8_t>(pool.name[i]);
-            put(36u, pool.attributes); put(40u, 0u); // index
+            put(36u, pool.attributes); put(40u, pool.index);
             put(44u, pool.block_size); put(48u, pool.count);
             put(52u, static_cast<std::uint32_t>(std::count(pool.owners.begin(), pool.owners.end(), SceUID{0})));
             put(56u, static_cast<std::uint32_t>(pool.waiters.size()));
