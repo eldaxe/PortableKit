@@ -864,6 +864,12 @@ void Kernel::release_mailbox_waiters(SceUID uid) {
         mailbox.messages.pop_front();
         mailbox.waiters.pop_front();
         if (thread->wait.out_address != 0u) runtime_->memory().store32(thread->wait.out_address, message);
+        if (trace_enabled())
+            std::cerr << "[kernel][mbx] deliver mailbox=" << uid << " receiver=" << thread->uid
+                      << " name=" << thread->name << " message=0x" << std::hex << message
+                      << " out=0x" << thread->wait.out_address << std::dec
+                      << " remaining_messages=" << mailbox.messages.size()
+                      << " remaining_waiters=" << mailbox.waiters.size() << "\n";
         wake(*thread, 0u);
     }
 }
