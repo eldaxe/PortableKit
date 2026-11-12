@@ -1103,7 +1103,6 @@ void Kernel::thread_exit_stub(AllegrexContext &ctx) {
 void Kernel::dispatch_thread_event(AllegrexContext &ctx, std::uint32_t event, SceUID target,
                                      GuestCallReturn on_complete) {
     constexpr SceUID kAllThreads = static_cast<SceUID>(0xFFFFFFFFu);
-    constexpr SceUID kKernelThreads = static_cast<SceUID>(0xFFFFFFF8u);
     constexpr SceUID kUserThreads = static_cast<SceUID>(0xFFFFFFF0u);
     std::vector<ThreadEventHandler> handlers;
     for (const auto &[uid, handler] : thread_event_handlers) {

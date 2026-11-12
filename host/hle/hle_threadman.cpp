@@ -67,7 +67,14 @@ void register_threads(HleRegistrar &hle) {
             });
     });
     hle.add("ThreadManForUser", "sceKernelTerminateThread", [](Runtime &, AllegrexContext &ctx) {
-        kernel().finish(ctx, as_unsigned(kernel().terminate_thread(ctx, as_signed(arg(ctx, 0)), false)));
+        const SceUID uid = as_signed(arg(ctx, 0));
+        const std::int32_t result = kernel().terminate_thread(ctx, uid, false);
+        if (result != 0) {
+            kernel().finish(ctx, as_unsigned(result));
+            return;
+        }
+        kernel().dispatch_thread_event(ctx, 4u, uid,
+            [](AllegrexContext &returned, std::uint32_t) { kernel().finish(returned, 0u); });
     });
     hle.add("ThreadManForUser", "sceKernelTerminateDeleteThread", [](Runtime &, AllegrexContext &ctx) {
         const SceUID uid = as_signed(arg(ctx, 0));
@@ -76,9 +83,12 @@ void register_threads(HleRegistrar &hle) {
             kernel().finish(ctx, as_unsigned(result));
             return;
         }
-        kernel().dispatch_thread_event(ctx, 8u, uid,
-            [uid](AllegrexContext &returned, std::uint32_t) {
-                kernel().finish(returned, as_unsigned(kernel().delete_thread(uid)));
+        kernel().dispatch_thread_event(ctx, 4u, uid,
+            [uid](AllegrexContext &after_exit, std::uint32_t) {
+                kernel().dispatch_thread_event(after_exit, 8u, uid,
+                    [uid](AllegrexContext &returned, std::uint32_t) {
+                        kernel().finish(returned, as_unsigned(kernel().delete_thread(uid)));
+                    });
             });
     });
     const auto get_thread_id = [](Runtime &, AllegrexContext &ctx) {
