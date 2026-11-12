@@ -121,6 +121,14 @@ struct WaitState {
     HostWaitPoll host_poll;       // WaitType::Host
 };
 
+struct ThreadEventHandler {
+    std::string name;
+    SceUID thread_id{};
+    std::uint32_t mask{};
+    std::uint32_t handler{};
+    std::uint32_t common{};
+};
+
 struct Thread {
     SceUID uid{};
     std::string name;
@@ -336,6 +344,7 @@ public:
     std::map<SceUID, Mutex> mutexes;
     std::map<SceUID, Mailbox> mailboxes;
     std::map<SceUID, Callback> callbacks;
+    std::map<SceUID, ThreadEventHandler> thread_event_handlers;
     std::map<SceUID, VTimer> vtimers;
     std::map<SceUID, Alarm> alarms;
     // Re-evaluates the waiters of an object after its state changed.

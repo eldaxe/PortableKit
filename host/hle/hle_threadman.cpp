@@ -886,6 +886,75 @@ void register_callbacks_and_timers(HleRegistrar &hle) {
         }
         kernel().finish(ctx, 0u);
     });
+
+    // Thread event handlers. Registration/status metadata is modelled here;
+    // lifecycle callback delivery is intentionally not reported as complete yet.
+    hle.add("ThreadManForUser", "sceKernelRegisterThreadEventHandler", [](Runtime &rt, AllegrexContext &ctx) {
+        const std::uint32_t name_address = arg(ctx, 0);
+        const SceUID thread_id = as_signed(arg(ctx, 1));
+        const std::uint32_t mask = arg(ctx, 2);
+        const std::uint32_t function = arg(ctx, 3);
+        const std::uint32_t common = arg(ctx, 4);
+        if (name_address == 0u || function == 0u || mask == 0u || (mask & ~0x0Fu) != 0u) {
+            kernel().finish(ctx, error::kIllegalArgument);
+            return;
+        }
+        if (thread_id != 0 && thread_id != static_cast<SceUID>(0xFFFFFFF0u) &&
+            kernel().find_thread(thread_id) == nullptr) {
+            kernel().finish(ctx, error::kUnknownThid);
+            return;
+        }
+        if (thread_id == 0 && mask != 4u) {
+            kernel().finish(ctx, error::kIllegalArgument);
+            return;
+        }
+        const SceUID uid = kernel().allocate_uid();
+        kernel().thread_event_handlers[uid] = ThreadEventHandler{
+            read_cstring(rt.memory(), name_address, 32u), thread_id, mask, function, common
+        };
+        kernel().finish(ctx, as_unsigned(uid));
+    });
+    hle.add("ThreadManForUser", "sceKernelReleaseThreadEventHandler", [](Runtime &, AllegrexContext &ctx) {
+        const SceUID uid = as_signed(arg(ctx, 0));
+        if (kernel().thread_event_handlers.erase(uid) == 0u)
+            kernel().finish(ctx, error::kUnknownUid);
+        else
+            kernel().finish(ctx, 0u);
+    });
+    hle.add("ThreadManForUser", "sceKernelReferThreadEventHandlerStatus", [](Runtime &rt, AllegrexContext &ctx) {
+        const SceUID uid = as_signed(arg(ctx, 0));
+        const auto found = kernel().thread_event_handlers.find(uid);
+        if (found == kernel().thread_event_handlers.end()) {
+            kernel().finish(ctx, error::kUnknownUid);
+            return;
+        }
+        auto &memory = rt.memory();
+        const std::uint32_t info = arg(ctx, 1);
+        if (info == 0u || !memory.contains(info, 4u)) {
+            kernel().finish(ctx, error::kIllegalAddress);
+            return;
+        }
+        const std::uint32_t size = memory.load32(info);
+        if (size != 0u) {
+            constexpr std::uint32_t kInfoSize = 52u;
+            std::array<std::uint8_t, kInfoSize> bytes{};
+            const auto put = [&bytes](std::uint32_t at, std::uint32_t value) {
+                for (unsigned i = 0; i < 4; ++i) bytes[at + i] = static_cast<std::uint8_t>(value >> (i * 8u));
+            };
+            put(0u, kInfoSize);
+            const auto &handler = found->second;
+            for (std::size_t i = 0; i < handler.name.size() && i < 31u; ++i)
+                bytes[4u + i] = static_cast<std::uint8_t>(handler.name[i]);
+            put(36u, as_unsigned(handler.thread_id));
+            put(40u, handler.mask);
+            put(44u, handler.handler);
+            put(48u, handler.common);
+            for (std::uint32_t i = 0; i < std::min(size, kInfoSize); ++i)
+                memory.store8(info + i, bytes[i]);
+        }
+        kernel().finish(ctx, 0u);
+    });
+
     hle.add("ThreadManForUser", "sceKernelReferCallbackStatus", [](Runtime &rt, AllegrexContext &ctx) {
         const auto found = kernel().callbacks.find(as_signed(arg(ctx, 0)));
         if (found == kernel().callbacks.end()) {
@@ -1992,7 +2061,7 @@ void register_threadman_id_list(HleRegistrar &hle) {
         case 6: append(fpls()); break;
         case 7: append(msg_pipes()); break;
         case 8: append(kernel().callbacks); break;
-        case 9: break; // Thread-event handlers are not modelled yet.
+        case 9: append(kernel().thread_event_handlers); break;
         case 10: append(kernel().alarms); break;
         case 11: append(kernel().vtimers); break;
         case 64: case 65: case 66: case 67:
