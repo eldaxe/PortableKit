@@ -895,15 +895,27 @@ void register_callbacks_and_timers(HleRegistrar &hle) {
         const std::uint32_t mask = arg(ctx, 2);
         const std::uint32_t function = arg(ctx, 3);
         const std::uint32_t common = arg(ctx, 4);
-        if (name_address == 0u || function == 0u || mask == 0u || (mask & ~0x0Fu) != 0u) {
+        if (name_address == 0u || !rt.memory().contains(name_address, 1u) || function == 0u) {
             kernel().finish(ctx, error::kIllegalArgument);
             return;
         }
-        if (thread_id != 0 && thread_id != static_cast<SceUID>(0xFFFFFFF0u) &&
-            kernel().find_thread(thread_id) == nullptr) {
+        // PSP SDK thread selectors: CURRENT, ALL_USER, ALL_KERNEL, ALL.
+        constexpr SceUID kAllThreads = static_cast<SceUID>(0xFFFFFFFFu);
+        constexpr SceUID kKernelThreads = static_cast<SceUID>(0xFFFFFFF8u);
+        constexpr SceUID kUserThreads = static_cast<SceUID>(0xFFFFFFF0u);
+        const bool selector = thread_id == 0 || thread_id == kUserThreads ||
+                              thread_id == kKernelThreads || thread_id == kAllThreads;
+        if (!selector && kernel().find_thread(thread_id) == nullptr) {
             kernel().finish(ctx, error::kUnknownThid);
             return;
         }
+        // Only the low four event bits are defined (CREATE/START/EXIT/DELETE).
+        // A zero mask is valid and simply never fires.
+        if ((mask & ~0x0Fu) != 0u) {
+            kernel().finish(ctx, error::kIllegalArgument);
+            return;
+        }
+        // CURRENT is the atexit-style registration and accepts EXIT only.
         if (thread_id == 0 && mask != 4u) {
             kernel().finish(ctx, error::kIllegalArgument);
             return;
