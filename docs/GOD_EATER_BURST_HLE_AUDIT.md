@@ -126,3 +126,17 @@ Allegrex BREAK remains a deliberate runtime stop. The interpreter now reports
 its encoded exception code explicitly. PortableKit does not yet implement the
 PSP CP0 exception vector, so this change is diagnostic and does not claim to
 recover from the guest assertion.
+
+
+## Follow-up implementation: thread lifecycle event callbacks
+
+PortableKit now dispatches guest thread-event callbacks for the four PSP lifecycle events:
+
+- CREATE (`1`) after a user thread object is created.
+- START (`2`) after the thread is made ready.
+- EXIT (`4`) when a thread exits normally or is forcibly terminated.
+- DELETE (`8`) immediately before a dormant/terminated thread object is removed.
+
+Callbacks receive the PSP ABI arguments `(eventMask, threadId, commonArg)`. Multiple matching handlers are called in UID/registration order, and the original HLE operation completes after the callback chain returns. The CURRENT selector is bound to the registering thread and remains EXIT-only. ALL_USER and ALL match the user threads represented by this runtime. ALL_KERNEL is accepted but currently has no matching kernel-thread objects.
+
+The implementation is source-reviewed only. It has not been built or tested against PSP hardware or a God Eater Burst runtime log. Callback reentrancy, callback release during an in-flight event, and exact firmware error semantics still need validation.
