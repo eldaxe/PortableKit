@@ -1381,6 +1381,7 @@ struct Tlspl {
     std::deque<SceUID> waiters;
 };
 constexpr std::uint32_t kTlsplAttrHighMemory = 0x4000u;
+constexpr std::uint32_t kTlsplAttrKnown = 0x4100u;
 constexpr std::uint32_t kUnknownTlsplid = 0x800201D0u;
 constexpr std::uint32_t kTooManyTlspl = 0x800201D1u;
 constexpr std::uint32_t kTlsplInUse = 0x800201D2u;
@@ -1434,7 +1435,7 @@ void register_tlspls(HleRegistrar &hle) {
         pool.block_size = arg(ctx, 3);
         const std::uint32_t partition = arg(ctx, 1);
         const std::uint32_t count = ctx.gpr[8], options = ctx.gpr[9];
-        if (!pool.block_size || !count || (pool.attributes & ~kTlsplAttrHighMemory) || partition < 1u || partition > 6u) {
+        if (!pool.block_size || !count || (pool.attributes & ~kTlsplAttrKnown) || partition < 1u || partition > 6u) {
             kernel().finish(ctx, error::kIllegalArgument); return;
         }
         if (options) {
