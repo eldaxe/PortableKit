@@ -14,8 +14,7 @@ const char *env(const char *name) {
     if (game().env_prefix == "GEBURST" &&
         (std::string_view(name) == "TRACE_GE" || std::string_view(name) == "TRACE_AUDIO" ||
          std::string_view(name) == "TRACE_MPEG" || std::string_view(name) == "TRACE_SAS" ||
-         std::string_view(name) == "TRACE_FB_TEXTURES" || std::string_view(name) == "TRACE_SYNC" ||
-         std::string_view(name) == "TRACE_KERNEL")) {
+         std::string_view(name) == "TRACE_FB_TEXTURES" || std::string_view(name) == "TRACE_SYNC")) {
         std::string full = game().env_prefix;
         full += '_';
         full += name;
