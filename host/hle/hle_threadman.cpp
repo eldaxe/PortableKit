@@ -1216,10 +1216,10 @@ void register_mailboxes(HleRegistrar &hle) {
         wait.timeout_address = arg(ctx, 2);
         kernel().block(ctx, wait, 0u);
     };
-    hle.try_add("ThreadManForUser", "sceKernelReceiveMbx", [](Runtime &rt, AllegrexContext &ctx) {
+    hle.try_add("ThreadManForUser", "sceKernelReceiveMbx", [receive](Runtime &rt, AllegrexContext &ctx) {
         receive(rt, ctx, false);
     });
-    hle.add("ThreadManForUser", "sceKernelReceiveMbxCB", [](Runtime &rt, AllegrexContext &ctx) {
+    hle.add("ThreadManForUser", "sceKernelReceiveMbxCB", [receive](Runtime &rt, AllegrexContext &ctx) {
         receive(rt, ctx, true);
     });
 }
