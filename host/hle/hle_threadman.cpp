@@ -1954,6 +1954,71 @@ void register_msg_pipes(HleRegistrar &hle) {
         }
         kernel().finish(ctx, 0u);
     });
+
+void register_threadman_id_list(HleRegistrar &hle) {
+    hle.add("ThreadManForUser", "sceKernelGetThreadmanIdList", [](Runtime &rt, AllegrexContext &ctx) {
+        auto &memory = rt.memory();
+        const std::int32_t type = as_signed(arg(ctx, 0));
+        const std::uint32_t buffer = arg(ctx, 1);
+        const std::int32_t capacity = as_signed(arg(ctx, 2));
+        const std::uint32_t count_address = arg(ctx, 3);
+        if (capacity < 0) {
+            kernel().finish(ctx, error::kIllegalArgument);
+            return;
+        }
+        if (count_address != 0u && !memory.contains(count_address, 4u)) {
+            kernel().finish(ctx, error::kIllegalAddress);
+            return;
+        }
+        const std::uint64_t buffer_bytes = static_cast<std::uint64_t>(capacity) * 4u;
+        if (buffer_bytes > 0xFFFFFFFFu ||
+            (capacity > 0 && (buffer == 0u || !memory.contains(buffer, static_cast<std::uint32_t>(buffer_bytes))))) {
+            kernel().finish(ctx, error::kIllegalAddress);
+            return;
+        }
+        std::vector<SceUID> ids;
+        const auto append = [&ids](const auto &objects) {
+            for (const auto &[uid, object] : objects) {
+                (void)object;
+                ids.push_back(uid);
+            }
+        };
+        switch (type) {
+        case 1: for (const SceUID uid : kernel().thread_ids()) ids.push_back(uid); break;
+        case 2: append(kernel().semaphores); break;
+        case 3: append(kernel().event_flags); break;
+        case 4: append(kernel().mailboxes); break;
+        case 5: append(vpls()); break;
+        case 6: append(fpls()); break;
+        case 7: append(msg_pipes()); break;
+        case 8: append(kernel().callbacks); break;
+        case 9: break; // Thread-event handlers are not modelled yet.
+        case 10: append(kernel().alarms); break;
+        case 11: append(kernel().vtimers); break;
+        case 64: case 65: case 66: case 67:
+            for (const SceUID uid : kernel().thread_ids()) {
+                const Thread *thread = kernel().find_thread(uid);
+                if (thread == nullptr) continue;
+                const bool matches =
+                    (type == 64 && thread->status == ThreadStatus::Waiting && thread->wait.type == WaitType::Sleep) ||
+                    (type == 65 && thread->status == ThreadStatus::Waiting && thread->wait.type == WaitType::Delay) ||
+                    (type == 66 && thread->suspended) ||
+                    (type == 67 && thread->status == ThreadStatus::Dormant);
+                if (matches) ids.push_back(uid);
+            }
+            break;
+        default:
+            kernel().finish(ctx, error::kIllegalArgument);
+            return;
+        }
+        const std::uint32_t copied = std::min<std::uint32_t>(
+            static_cast<std::uint32_t>(ids.size()), static_cast<std::uint32_t>(capacity));
+        for (std::uint32_t i = 0; i < copied; ++i)
+            memory.store32(buffer + i * 4u, as_unsigned(ids[i]));
+        if (count_address != 0u) memory.store32(count_address, static_cast<std::uint32_t>(ids.size()));
+        kernel().finish(ctx, copied);
+    });
+}
 }
 } // namespace
 
@@ -1971,6 +2036,7 @@ void register_threadman(HleRegistrar &hle) {
     register_msg_pipes(hle);
     register_callbacks_and_timers(hle);
     register_kernel_library(hle);
+    register_threadman_id_list(hle);
 }
 
 } // namespace portablekit

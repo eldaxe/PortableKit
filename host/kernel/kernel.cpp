@@ -134,6 +134,13 @@ Thread *Kernel::find_thread(SceUID uid) noexcept {
     return found != threads_.end() ? found->second.get() : nullptr;
 }
 
+std::vector<SceUID> Kernel::thread_ids() const {
+    std::vector<SceUID> ids;
+    ids.reserve(threads_.size());
+    for (const auto &[uid, thread] : threads_) ids.push_back(uid);
+    return ids;
+}
+
 void Kernel::start_loader_thread(AllegrexContext &ctx, std::uint32_t entry, std::uint32_t stack_top) {
     auto thread = std::make_unique<Thread>();
     thread->uid = allocate_uid();

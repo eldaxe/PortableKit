@@ -1119,10 +1119,17 @@ void register_audio(HleRegistrar &hle) {
         kernel().finish(ctx, audio::sas_core(arg(ctx, 0)).set_sustain_level(arg(ctx, 1), static_cast<std::int32_t>(arg(ctx, 2))));
     });
     // __sceSasGetAllEnvelopeHeights(core, heights): 32 words, one per voice.
+    // Validate the complete output range before writing any values.
     hle.try_add("sceSasCore", "__sceSasGetAllEnvelopeHeights", [](Runtime &rt, AllegrexContext &ctx) {
-        auto &core = audio::sas_core(arg(ctx, 0));
+        const audio::SasCore &sas = audio::sas_core(arg(ctx, 0));
+        const std::uint32_t heights = arg(ctx, 1);
+        auto &memory = rt.memory();
+        if (heights == 0u || !memory.contains(heights, audio::kSasMaxVoices * 4u)) {
+            kernel().finish(ctx, error::kIllegalAddress);
+            return;
+        }
         for (std::uint32_t voice = 0; voice < audio::kSasMaxVoices; ++voice)
-            rt.memory().store32(arg(ctx, 1) + voice * 4u, static_cast<std::uint32_t>(core.envelope_height(voice)));
+            memory.store32(heights + voice * 4u, static_cast<std::uint32_t>(sas.envelope_height(voice)));
         kernel().finish(ctx, 0u);
     });
     hle.try_add("sceSasCore", "__sceSasGetGrain", [](Runtime &, AllegrexContext &ctx) {
@@ -1139,20 +1146,6 @@ void register_audio(HleRegistrar &hle) {
     });
     hle.try_add("sceSasCore", "__sceSasGetEnvelopeHeight", [](Runtime &, AllegrexContext &ctx) {
         kernel().finish(ctx, static_cast<std::uint32_t>(audio::sas_core(arg(ctx, 0)).envelope_height(arg(ctx, 1))));
-    });
-    // __sceSasGetAllEnvelopeHeights(core, heights): every voice's envelope
-    // height, 32 words. Stubbed, the game read back whatever the buffer held.
-    hle.try_add("sceSasCore", "__sceSasGetAllEnvelopeHeights", [](Runtime &rt, AllegrexContext &ctx) {
-        const audio::SasCore &sas = audio::sas_core(arg(ctx, 0));
-        const std::uint32_t heights = arg(ctx, 1);
-        auto &memory = rt.memory();
-        if (memory.contains(heights, audio::kSasMaxVoices * 4u))
-            for (std::uint32_t voice = 0; voice < audio::kSasMaxVoices; ++voice)
-                memory.store32(heights + voice * 4u, static_cast<std::uint32_t>(sas.envelope_height(voice)));
-        kernel().finish(ctx, 0u);
-    });
-    hle.try_add("sceSasCore", "__sceSasGetPauseFlag", [](Runtime &, AllegrexContext &ctx) {
-        kernel().finish(ctx, audio::sas_core(arg(ctx, 0)).pause_flags());
     });
     // Reverb is not modelled, so the sends are accepted and dropped.
     for (const char *name : {"__sceSasRevType", "__sceSasRevParam", "__sceSasRevEVOL", "__sceSasRevVON"})

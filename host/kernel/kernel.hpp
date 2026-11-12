@@ -287,6 +287,7 @@ public:
     // Threads -------------------------------------------------------------
     [[nodiscard]] SceUID allocate_uid() noexcept { return next_uid_++; }
     [[nodiscard]] Thread *find_thread(SceUID uid) noexcept;
+    [[nodiscard]] std::vector<SceUID> thread_ids() const;
     [[nodiscard]] Thread *current_thread() noexcept { return find_thread(current_uid_); }
     [[nodiscard]] SceUID current_uid() const noexcept { return current_uid_; }
     // Creates the thread that runs module_start and makes it current.
