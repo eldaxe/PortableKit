@@ -2327,7 +2327,6 @@ void register_threadman_id_list(HleRegistrar &hle) {
         kernel().finish(ctx, copied);
     });
 }
-}
 } // namespace
 
 void register_threadman(HleRegistrar &hle) {
