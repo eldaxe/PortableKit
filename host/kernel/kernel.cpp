@@ -243,6 +243,7 @@ void Kernel::exit_current_thread(AllegrexContext &ctx, std::int32_t status, bool
             [this, status, delete_thread](AllegrexContext &returned, std::uint32_t) {
                 Thread *exiting = current_thread();
                 if (exiting != nullptr) {
+                    if (thread_cleanup_hook_) thread_cleanup_hook_(exiting->uid);
                     exiting->exit_status = status;
                     exiting->status = ThreadStatus::Dormant;
                     const SceUID uid = exiting->uid;
@@ -277,6 +278,7 @@ std::int32_t Kernel::terminate_thread(AllegrexContext &ctx, SceUID uid, bool del
     if (thread == nullptr) return static_cast<std::int32_t>(error::kUnknownThid);
     if (uid == current_uid_) return static_cast<std::int32_t>(error::kIllegalThid);
     if (thread->status == ThreadStatus::Waiting) remove_waiter(*thread);
+    if (thread_cleanup_hook_) thread_cleanup_hook_(uid);
     thread->status = ThreadStatus::Dormant;
     thread->exit_status = static_cast<std::int32_t>(0x800201ACu);
     if (delete_thread) return this->delete_thread(uid);
@@ -288,6 +290,7 @@ std::int32_t Kernel::delete_thread(SceUID uid) {
     if (thread == nullptr) return static_cast<std::int32_t>(error::kUnknownThid);
     if (thread->status != ThreadStatus::Dormant && thread->status != ThreadStatus::Dead)
         return static_cast<std::int32_t>(error::kNotDormant);
+    if (thread_cleanup_hook_) thread_cleanup_hook_(uid);
     if (thread->stack_block != 0) (void)free_block(thread->stack_block);
     threads_.erase(uid);
     return 0;
@@ -1104,22 +1107,29 @@ void Kernel::dispatch_thread_event(AllegrexContext &ctx, std::uint32_t event, Sc
                                      GuestCallReturn on_complete) {
     constexpr SceUID kAllThreads = static_cast<SceUID>(0xFFFFFFFFu);
     constexpr SceUID kUserThreads = static_cast<SceUID>(0xFFFFFFF0u);
-    std::vector<ThreadEventHandler> handlers;
+    // Snapshot UIDs, not handler values. A callback may release itself or a
+    // later handler; a released handler must not run when its turn arrives.
+    std::vector<SceUID> handlers;
     for (const auto &[uid, handler] : thread_event_handlers) {
-        (void)uid;
         const bool selected = handler.thread_id == target ||
             handler.thread_id == kAllThreads || handler.thread_id == kUserThreads;
         // This runtime currently represents game threads only; no distinct
         // kernel-thread class exists to match ALL_KERNEL.
         if (selected && (handler.mask & event) != 0u && handler.handler != 0u)
-            handlers.push_back(handler);
+            handlers.push_back(uid);
     }
     GuestCallReturn chain = std::move(on_complete);
     for (auto it = handlers.rbegin(); it != handlers.rend(); ++it) {
-        const ThreadEventHandler handler = *it;
+        const SceUID handler_uid = *it;
         GuestCallReturn previous = std::move(chain);
-        chain = [this, handler, previous = std::move(previous), event, target]
+        chain = [this, handler_uid, previous = std::move(previous), event, target]
                 (AllegrexContext &current, std::uint32_t) mutable {
+            const auto found = thread_event_handlers.find(handler_uid);
+            if (found == thread_event_handlers.end()) {
+                if (previous) previous(current, current.gpr[2]);
+                return;
+            }
+            const ThreadEventHandler handler = found->second;
             GuestCallArguments args{};
             args[0] = event;
             args[1] = static_cast<std::uint32_t>(target);

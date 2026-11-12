@@ -140,3 +140,12 @@ PortableKit now dispatches guest thread-event callbacks for the four PSP lifecyc
 Callbacks receive the PSP ABI arguments `(eventMask, threadId, commonArg)`. Multiple matching handlers are called in UID/registration order, and the original HLE operation completes after the callback chain returns. The CURRENT selector is bound to the registering thread and remains EXIT-only. ALL_USER and ALL match the user threads represented by this runtime. ALL_KERNEL is accepted but currently has no matching kernel-thread objects.
 
 The implementation is source-reviewed only. It has not been built or tested against PSP hardware or a God Eater Burst runtime log. Callback reentrancy, callback release during an in-flight event, and exact firmware error semantics still need validation.
+
+
+## TLS pool and callback lifecycle follow-up
+
+PortableKit now models TLS pool creation, deletion, per-thread slot allocation and release, status reporting, and ThreadMan ID-list type 12. Slots are zeroed when allocated and freed when their owning thread exits or is terminated. Exhausted pools use a FIFO wait queue. `sceKernelGetTlsAddr` is registered under `Kernel_Library`.
+
+Thread-event dispatch now snapshots handler UIDs rather than handler values. If one handler releases a later handler during the same event, the released handler is skipped when its turn arrives. A currently executing handler is allowed to return. The existing per-thread guest-call stack remains responsible for preserving a blocking handler's continuation and nested callback calls.
+
+These are source changes only. Native build, TLS contention tests, callback regression tests, and Android runtime validation remain outstanding. The 11 MJPEG imports remain unimplemented in this commit.

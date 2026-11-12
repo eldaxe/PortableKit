@@ -1372,6 +1372,161 @@ void register_lightweight_mutexes(HleRegistrar &hle) {
     });
 }
 
+// Thread-local storage pools. Each live thread owns at most one slot per
+// pool; slots are zeroed on allocation and release. Exhausted pools wait FIFO.
+struct Tlspl {
+    std::string name;
+    std::uint32_t attributes{}, block{}, address{}, block_size{}, count{}, alignment{4u}, next{};
+    std::vector<SceUID> owners;
+    std::deque<SceUID> waiters;
+};
+constexpr std::uint32_t kTlsplAttrHighMemory = 0x4000u;
+constexpr std::uint32_t kUnknownTlsplid = 0x800201BAu;
+constexpr std::uint32_t kTlsplInUse = 0x800201B9u;
+constexpr std::uint32_t kWaitDeleteTlspl = 0x800201B5u;
+std::map<SceUID, Tlspl> &tlspls() { static std::map<SceUID, Tlspl> pools; return pools; }
+
+std::uint32_t tls_stride(const Tlspl &pool) {
+    return (pool.block_size + pool.alignment - 1u) & ~(pool.alignment - 1u);
+}
+std::optional<std::uint32_t> tls_allocate(Tlspl &pool, SceUID thread, psprecomp::GuestMemory &memory) {
+    const std::uint32_t stride = tls_stride(pool);
+    for (std::uint32_t i = 0; i < pool.count; ++i)
+        if (pool.owners[i] == thread) return pool.address + i * stride;
+    for (std::uint32_t n = 0; n < pool.count; ++n) {
+        const std::uint32_t i = (pool.next + n) % pool.count;
+        if (pool.owners[i] != 0) continue;
+        pool.owners[i] = thread;
+        pool.next = (i + 1u) % pool.count;
+        const std::uint32_t address = pool.address + i * stride;
+        for (std::uint32_t j = 0; j < pool.block_size; ++j) memory.store8(address + j, 0u);
+        return address;
+    }
+    return std::nullopt;
+}
+bool tls_free(Tlspl &pool, SceUID thread, psprecomp::GuestMemory &memory) {
+    const std::uint32_t stride = tls_stride(pool);
+    for (std::uint32_t i = 0; i < pool.count; ++i) {
+        if (pool.owners[i] != thread) continue;
+        const std::uint32_t address = pool.address + i * stride;
+        for (std::uint32_t j = 0; j < pool.block_size; ++j) memory.store8(address + j, 0u);
+        pool.owners[i] = 0;
+        return true;
+    }
+    return false;
+}
+void register_tlspls(HleRegistrar &hle) {
+    kernel().set_thread_cleanup_hook([](SceUID thread) {
+        auto &memory = kernel().runtime().memory();
+        for (auto &[uid, pool] : tlspls()) {
+            (void)uid;
+            (void)tls_free(pool, thread, memory);
+            pool.waiters.erase(std::remove(pool.waiters.begin(), pool.waiters.end(), thread), pool.waiters.end());
+        }
+    });
+    hle.add("ThreadManForUser", "sceKernelCreateTlspl", [](Runtime &rt, AllegrexContext &ctx) {
+        auto &memory = rt.memory();
+        Tlspl pool;
+        pool.name = arg(ctx, 0) ? read_cstring(memory, arg(ctx, 0), 32u) : std::string();
+        pool.attributes = arg(ctx, 2);
+        pool.block_size = arg(ctx, 3);
+        const std::uint32_t count = ctx.gpr[8], options = ctx.gpr[9];
+        if (!pool.block_size || !count || (pool.attributes & ~kTlsplAttrHighMemory)) {
+            kernel().finish(ctx, error::kIllegalArgument); return;
+        }
+        if (options) {
+            if (!memory.contains(options, 4u)) { kernel().finish(ctx, error::kIllegalAddress); return; }
+            if (memory.load32(options) >= 8u) {
+                if (!memory.contains(options, 8u)) { kernel().finish(ctx, error::kIllegalAddress); return; }
+                pool.alignment = memory.load32(options + 4u);
+            }
+        }
+        if (pool.alignment == 0u) pool.alignment = 4u;
+        if ((pool.alignment & (pool.alignment - 1u)) != 0u) {
+            kernel().finish(ctx, error::kIllegalArgument); return;
+        }
+        pool.alignment = std::max(pool.alignment, 4u);
+        const std::uint64_t stride = (static_cast<std::uint64_t>(pool.block_size) + pool.alignment - 1u) & ~std::uint64_t{pool.alignment - 1u};
+        const std::uint64_t bytes = stride * count;
+        if (!bytes || bytes > 0xFFFFFFFFull) { kernel().finish(ctx, 0x800201B7u); return; }
+        const std::int32_t block = kernel().allocate_block("tlspl:" + pool.name,
+            (pool.attributes & kTlsplAttrHighMemory) ? 1u : 0u, static_cast<std::uint32_t>(bytes), 0u);
+        if (block < 0) { kernel().finish(ctx, as_unsigned(block)); return; }
+        const MemoryBlock *memblock = kernel().find_block(block);
+        if (!memblock) { (void)kernel().free_block(block); kernel().finish(ctx, error::kNoMemory); return; }
+        pool.block = static_cast<std::uint32_t>(block);
+        pool.address = memblock->address;
+        pool.count = count;
+        pool.owners.assign(count, 0);
+        const SceUID uid = kernel().allocate_uid();
+        tlspls().emplace(uid, std::move(pool));
+        kernel().finish(ctx, as_unsigned(uid));
+    });
+    hle.add("ThreadManForUser", "sceKernelDeleteTlspl", [](Runtime &rt, AllegrexContext &ctx) {
+        const SceUID uid = as_signed(arg(ctx, 0));
+        auto found = tlspls().find(uid);
+        if (found == tlspls().end()) { kernel().finish(ctx, kUnknownTlsplid); return; }
+        for (const SceUID owner : found->second.owners)
+            if (owner && owner != kernel().current_uid()) { kernel().finish(ctx, kTlsplInUse); return; }
+        (void)tls_free(found->second, kernel().current_uid(), rt.memory());
+        const std::uint32_t block = found->second.block;
+        tlspls().erase(found);
+        (void)kernel().free_block(static_cast<SceUID>(block));
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("ThreadManForUser", "sceKernelFreeTlspl", [](Runtime &rt, AllegrexContext &ctx) {
+        auto found = tlspls().find(as_signed(arg(ctx, 0)));
+        if (found == tlspls().end()) { kernel().finish(ctx, kUnknownTlsplid); return; }
+        kernel().finish(ctx, tls_free(found->second, kernel().current_uid(), rt.memory()) ? 0u : error::kIllegalArgument);
+    });
+    hle.add("ThreadManForUser", "sceKernelReferTlsplStatus", [](Runtime &rt, AllegrexContext &ctx) {
+        auto found = tlspls().find(as_signed(arg(ctx, 0)));
+        if (found == tlspls().end()) { kernel().finish(ctx, kUnknownTlsplid); return; }
+        auto &memory = rt.memory();
+        const std::uint32_t info = arg(ctx, 1);
+        if (!info || !memory.contains(info, 4u)) { kernel().finish(ctx, error::kIllegalAddress); return; }
+        const std::uint32_t size = memory.load32(info);
+        if (size) {
+            constexpr std::uint32_t kInfoSize = 60u;
+            const std::uint32_t written = std::min(size, kInfoSize);
+            if (!memory.contains(info, written)) { kernel().finish(ctx, error::kIllegalAddress); return; }
+            std::array<std::uint8_t, kInfoSize> bytes{};
+            const auto put = [&bytes](std::uint32_t at, std::uint32_t value) {
+                for (unsigned i = 0; i < 4u; ++i) bytes[at + i] = static_cast<std::uint8_t>(value >> (i * 8u));
+            };
+            const Tlspl &pool = found->second;
+            put(0u, kInfoSize);
+            for (std::size_t i = 0; i < pool.name.size() && i < 31u; ++i) bytes[4u + i] = static_cast<std::uint8_t>(pool.name[i]);
+            put(36u, pool.attributes); put(40u, 0u); // index
+            put(44u, pool.block_size); put(48u, pool.count);
+            put(52u, static_cast<std::uint32_t>(std::count(pool.owners.begin(), pool.owners.end(), SceUID{0})));
+            put(56u, static_cast<std::uint32_t>(pool.waiters.size()));
+            for (std::uint32_t i = 0; i < written; ++i) memory.store8(info + i, bytes[i]);
+        }
+        kernel().finish(ctx, 0u);
+    });
+    hle.add("Kernel_Library", "sceKernelGetTlsAddr", [](Runtime &rt, AllegrexContext &ctx) {
+        const SceUID uid = as_signed(arg(ctx, 0));
+        auto found = tlspls().find(uid);
+        if (found == tlspls().end()) { kernel().finish(ctx, 0u); return; }
+        if (!kernel().dispatch_enabled() || kernel().in_interrupt()) { kernel().finish(ctx, 0u); return; }
+        if (const auto address = tls_allocate(found->second, kernel().current_uid(), rt.memory())) {
+            kernel().finish(ctx, *address); return;
+        }
+        found->second.waiters.push_back(kernel().current_uid());
+        kernel().wait_host(ctx, std::nullopt, [uid, thread = kernel().current_uid()](bool) -> std::optional<std::uint32_t> {
+            auto pool = tlspls().find(uid);
+            if (pool == tlspls().end()) return kWaitDeleteTlspl;
+            auto &waiters = pool->second.waiters;
+            if (waiters.empty() || waiters.front() != thread) return std::nullopt;
+            const auto address = tls_allocate(pool->second, thread, kernel().runtime().memory());
+            if (!address) return std::nullopt;
+            waiters.pop_front();
+            return *address;
+        });
+    });
+}
+
 void register_kernel_library(HleRegistrar &hle) {
     // Bytes left on the current thread's stack, which a game checks before it
     // recurses. A stub returning 0 says the stack is exhausted, and the game
@@ -2125,6 +2280,7 @@ void register_threadman_id_list(HleRegistrar &hle) {
         case 9: append(kernel().thread_event_handlers); break;
         case 10: append(kernel().alarms); break;
         case 11: append(kernel().vtimers); break;
+        case 12: append(tlspls()); break;
         case 64: case 65: case 66: case 67:
             for (const SceUID uid : kernel().thread_ids()) {
                 const Thread *thread = kernel().find_thread(uid);
@@ -2162,6 +2318,7 @@ void register_threadman(HleRegistrar &hle) {
     register_stack_extension(hle);
     register_mailboxes(hle);
     register_vpls(hle);
+    register_tlspls(hle);
     register_fpls(hle);
     register_msg_pipes(hle);
     register_callbacks_and_timers(hle);

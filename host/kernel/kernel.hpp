@@ -296,6 +296,8 @@ public:
     [[nodiscard]] SceUID allocate_uid() noexcept { return next_uid_++; }
     [[nodiscard]] Thread *find_thread(SceUID uid) noexcept;
     [[nodiscard]] std::vector<SceUID> thread_ids() const;
+    // HLE-owned per-thread resources are released when a guest thread exits.
+    void set_thread_cleanup_hook(std::function<void(SceUID)> hook) { thread_cleanup_hook_ = std::move(hook); }
     [[nodiscard]] Thread *current_thread() noexcept { return find_thread(current_uid_); }
     [[nodiscard]] SceUID current_uid() const noexcept { return current_uid_; }
     // Creates the thread that runs module_start and makes it current.
@@ -441,6 +443,7 @@ private:
     SceUID current_uid_{};
     std::uint64_t next_ready_sequence_{1u};
     std::map<SceUID, std::unique_ptr<Thread>> threads_;
+    std::function<void(SceUID)> thread_cleanup_hook_;
     std::uint64_t now_us_{};
     std::uint64_t waits_begun_{};  // waits begun, so a busy thread can tell it has not waited
     SceUID busy_thread_{};
