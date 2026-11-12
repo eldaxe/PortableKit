@@ -1169,7 +1169,7 @@ void register_mailboxes(HleRegistrar &hle) {
     // would mean knowing that header's layout. FIFO is what this does, and it
     // says so rather than pretending.
     constexpr std::uint32_t kMbxAttrMessagePriority = 0x400u;
-    hle.add("ThreadManForUser", "sceKernelCreateMbx", [](Runtime &rt, AllegrexContext &ctx) {
+    hle.add("ThreadManForUser", "sceKernelCreateMbx", [trace_mailbox](Runtime &rt, AllegrexContext &ctx) {
         const SceUID uid = kernel().allocate_uid();
         Mailbox mailbox;
         mailbox.name = read_cstring(rt.memory(), arg(ctx, 0), 32u);
@@ -1182,7 +1182,7 @@ void register_mailboxes(HleRegistrar &hle) {
         trace_mailbox("create owner=" + std::to_string(kernel().current_uid()), uid, kernel().mailboxes[uid]);
         kernel().finish(ctx, as_unsigned(uid));
     });
-    hle.add("ThreadManForUser", "sceKernelDeleteMbx", [](Runtime &, AllegrexContext &ctx) {
+    hle.add("ThreadManForUser", "sceKernelDeleteMbx", [trace_mailbox, describe_waiters](Runtime &, AllegrexContext &ctx) {
         auto found = kernel().mailboxes.find(as_signed(arg(ctx, 0)));
         if (found == kernel().mailboxes.end()) {
             kernel().finish(ctx, error::kUnknownMbxid);
@@ -1194,7 +1194,7 @@ void register_mailboxes(HleRegistrar &hle) {
         kernel().mailboxes.erase(found);
         kernel().finish(ctx, 0u);
     });
-    hle.add("ThreadManForUser", "sceKernelSendMbx", [](Runtime &, AllegrexContext &ctx) {
+    hle.add("ThreadManForUser", "sceKernelSendMbx", [trace_mailbox, describe_waiters](Runtime &, AllegrexContext &ctx) {
         const SceUID uid = as_signed(arg(ctx, 0));
         auto found = kernel().mailboxes.find(uid);
         if (found == kernel().mailboxes.end()) {
@@ -1213,7 +1213,7 @@ void register_mailboxes(HleRegistrar &hle) {
             trace_mailbox("send-release sender=" + std::to_string(sender) +
                           " queued=" + describe_waiters(after_release->second), uid, after_release->second);
     });
-    hle.add("ThreadManForUser", "sceKernelPollMbx", [](Runtime &rt, AllegrexContext &ctx) {
+    hle.add("ThreadManForUser", "sceKernelPollMbx", [trace_mailbox](Runtime &rt, AllegrexContext &ctx) {
         auto found = kernel().mailboxes.find(as_signed(arg(ctx, 0)));
         if (found == kernel().mailboxes.end()) {
             kernel().finish(ctx, error::kUnknownMbxid);
@@ -1232,7 +1232,7 @@ void register_mailboxes(HleRegistrar &hle) {
         mailbox.messages.pop_front();
         kernel().finish(ctx, 0u);
     });
-    const auto receive = [](Runtime &rt, AllegrexContext &ctx, bool callback_aware) {
+    const auto receive = [trace_mailbox](Runtime &rt, AllegrexContext &ctx, bool callback_aware) {
         // The CB import must deliver callbacks notified for this thread before
         // it enters the mailbox wait. The non-CB import deliberately does not.
         if (callback_aware) (void)kernel().deliver_callbacks();
