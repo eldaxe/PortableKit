@@ -1190,7 +1190,10 @@ void register_mailboxes(HleRegistrar &hle) {
         mailbox.messages.pop_front();
         kernel().finish(ctx, 0u);
     });
-    const auto receive = [](Runtime &rt, AllegrexContext &ctx) {
+    const auto receive = [](Runtime &rt, AllegrexContext &ctx, bool callback_aware) {
+        // The CB import must deliver callbacks notified for this thread before
+        // it enters the mailbox wait. The non-CB import deliberately does not.
+        if (callback_aware) (void)kernel().deliver_callbacks();
         const SceUID uid = as_signed(arg(ctx, 0));
         auto found = kernel().mailboxes.find(uid);
         if (found == kernel().mailboxes.end()) {
@@ -1213,8 +1216,12 @@ void register_mailboxes(HleRegistrar &hle) {
         wait.timeout_address = arg(ctx, 2);
         kernel().block(ctx, wait, 0u);
     };
-    hle.try_add("ThreadManForUser", "sceKernelReceiveMbx", receive);
-    hle.add("ThreadManForUser", "sceKernelReceiveMbxCB", receive);
+    hle.try_add("ThreadManForUser", "sceKernelReceiveMbx", [](Runtime &rt, AllegrexContext &ctx) {
+        receive(rt, ctx, false);
+    });
+    hle.add("ThreadManForUser", "sceKernelReceiveMbxCB", [](Runtime &rt, AllegrexContext &ctx) {
+        receive(rt, ctx, true);
+    });
 }
 
 void register_stack_extension(HleRegistrar &hle) {
