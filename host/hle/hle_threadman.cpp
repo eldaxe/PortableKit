@@ -949,6 +949,11 @@ void register_callbacks_and_timers(HleRegistrar &hle) {
         const std::uint32_t size = memory.load32(info);
         if (size != 0u) {
             constexpr std::uint32_t kInfoSize = 52u;
+            const std::uint32_t write_size = std::min(size, kInfoSize);
+            if (!memory.contains(info, write_size)) {
+                kernel().finish(ctx, error::kIllegalAddress);
+                return;
+            }
             std::array<std::uint8_t, kInfoSize> bytes{};
             const auto put = [&bytes](std::uint32_t at, std::uint32_t value) {
                 for (unsigned i = 0; i < 4; ++i) bytes[at + i] = static_cast<std::uint8_t>(value >> (i * 8u));
@@ -961,7 +966,7 @@ void register_callbacks_and_timers(HleRegistrar &hle) {
             put(40u, handler.mask);
             put(44u, handler.handler);
             put(48u, handler.common);
-            for (std::uint32_t i = 0; i < std::min(size, kInfoSize); ++i)
+            for (std::uint32_t i = 0; i < write_size; ++i)
                 memory.store8(info + i, bytes[i]);
         }
         kernel().finish(ctx, 0u);
