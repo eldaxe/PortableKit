@@ -25,11 +25,24 @@ std::uint32_t as_unsigned(std::int32_t value) { return static_cast<std::uint32_t
 void register_threads(HleRegistrar &hle) {
     hle.add("ThreadManForUser", "sceKernelCreateThread", [](Runtime &rt, AllegrexContext &ctx) {
         const std::string name = read_cstring(rt.memory(), arg(ctx, 0), 32u);
-        kernel().finish(ctx, as_unsigned(kernel().create_thread(name, arg(ctx, 1), arg(ctx, 2), arg(ctx, 3),
-                                                                arg(ctx, 4), ctx.gpr[28])));
+        const std::int32_t uid = kernel().create_thread(name, arg(ctx, 1), arg(ctx, 2), arg(ctx, 3),
+                                                        arg(ctx, 4), ctx.gpr[28]);
+        if (uid < 0) {
+            kernel().finish(ctx, as_unsigned(uid));
+            return;
+        }
+        kernel().dispatch_thread_event(ctx, 1u, uid,
+            [uid](AllegrexContext &returned, std::uint32_t) { kernel().finish(returned, as_unsigned(uid)); });
     });
     hle.add("ThreadManForUser", "sceKernelStartThread", [](Runtime &, AllegrexContext &ctx) {
-        kernel().finish(ctx, as_unsigned(kernel().start_thread(ctx, as_signed(arg(ctx, 0)), arg(ctx, 1), arg(ctx, 2))));
+        const SceUID uid = as_signed(arg(ctx, 0));
+        const std::int32_t result = kernel().start_thread(ctx, uid, arg(ctx, 1), arg(ctx, 2));
+        if (result != 0) {
+            kernel().finish(ctx, as_unsigned(result));
+            return;
+        }
+        kernel().dispatch_thread_event(ctx, 2u, uid,
+            [](AllegrexContext &returned, std::uint32_t) { kernel().finish(returned, 0u); });
     });
     hle.add("ThreadManForUser", "sceKernelExitThread", [](Runtime &, AllegrexContext &ctx) {
         kernel().exit_current_thread(ctx, as_signed(arg(ctx, 0)), false);

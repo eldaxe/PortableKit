@@ -335,6 +335,9 @@ public:
     using GuestCallReturn = std::function<void(AllegrexContext &, std::uint32_t)>;
     void call_guest(AllegrexContext &ctx, std::uint32_t function, const GuestCallArguments &arguments,
                     GuestCallReturn on_return, std::uint32_t argument_count = 4u);
+    // Dispatch PSP thread lifecycle notifications in the current guest thread.
+    void dispatch_thread_event(AllegrexContext &ctx, std::uint32_t event, SceUID target,
+                               GuestCallReturn on_complete);
     void set_dispatch_enabled(bool enabled) noexcept { dispatch_enabled_ = enabled; }
     [[nodiscard]] bool dispatch_enabled() const noexcept { return dispatch_enabled_; }
 

@@ -237,20 +237,27 @@ std::int32_t Kernel::start_thread(AllegrexContext &ctx, SceUID uid, std::uint32_
 
 void Kernel::exit_current_thread(AllegrexContext &ctx, std::int32_t status, bool delete_thread) {
     Thread *thread = current_thread();
-    if (trace_enabled())
-        std::cerr << "[kernel] exit thread uid=" << current_uid_
-                  << " name=" << (thread != nullptr ? thread->name : "?") << " status=" << status << "\n";
     if (thread != nullptr) {
-        thread->exit_status = status;
-        thread->status = ThreadStatus::Dormant;
-        const SceUID uid = thread->uid;
-        for (auto &[other_uid, other] : threads_) {
-            (void)other_uid;
-            if (other->status == ThreadStatus::Waiting && other->wait.type == WaitType::ThreadEnd &&
-                other->wait.object == uid)
-                wake(*other, static_cast<std::uint32_t>(status));
-        }
-        if (delete_thread) (void)this->delete_thread(uid);
+        const SceUID exiting_uid = thread->uid;
+        dispatch_thread_event(ctx, 4u, exiting_uid,
+            [this, status, delete_thread](AllegrexContext &returned, std::uint32_t) {
+                Thread *exiting = current_thread();
+                if (exiting != nullptr) {
+                    exiting->exit_status = status;
+                    exiting->status = ThreadStatus::Dormant;
+                    const SceUID uid = exiting->uid;
+                    for (auto &[other_uid, other] : threads_) {
+                        (void)other_uid;
+                        if (other->status == ThreadStatus::Waiting && other->wait.type == WaitType::ThreadEnd &&
+                            other->wait.object == uid)
+                            wake(*other, static_cast<std::uint32_t>(status));
+                    }
+                    if (delete_thread) (void)this->delete_thread(uid);
+                }
+                current_uid_ = 0;
+                schedule(returned);
+            });
+        return;
     }
     current_uid_ = 0;
     schedule(ctx);
@@ -1083,6 +1090,41 @@ void Kernel::interrupt_return_stub(AllegrexContext &ctx) {
 void Kernel::thread_exit_stub(AllegrexContext &ctx) {
     exit_current_thread(ctx, static_cast<std::int32_t>(ctx.gpr[2]), current_thread() != nullptr &&
                                                                          current_thread()->name == "module_start");
+}
+
+void Kernel::dispatch_thread_event(AllegrexContext &ctx, std::uint32_t event, SceUID target,
+                                     GuestCallReturn on_complete) {
+    constexpr SceUID kAllThreads = static_cast<SceUID>(0xFFFFFFFFu);
+    constexpr SceUID kKernelThreads = static_cast<SceUID>(0xFFFFFFF8u);
+    constexpr SceUID kUserThreads = static_cast<SceUID>(0xFFFFFFF0u);
+    auto handlers = std::make_shared<std::vector<ThreadEventHandler>>();
+    for (const auto &[uid, handler] : thread_event_handlers) {
+        (void)uid;
+        const bool selected = handler.thread_id == target ||
+            handler.thread_id == kAllThreads || handler.thread_id == kUserThreads ||
+            (handler.thread_id == 0 && target == current_uid_);
+        // This runtime currently represents game threads only; no distinct
+        // kernel-thread class exists to match ALL_KERNEL.
+        if (selected && (handler.mask & event) != 0u && handler.handler != 0u)
+            handlers->push_back(handler);
+    }
+    auto index = std::make_shared<std::size_t>(0u);
+    auto next = std::make_shared<std::function<void(AllegrexContext &)>>();
+    *next = [this, handlers, index, next, on_complete = std::move(on_complete), event, target]
+            (AllegrexContext &current) mutable {
+        if (*index >= handlers->size()) {
+            if (on_complete) on_complete(current, current.gpr[2]);
+            return;
+        }
+        const ThreadEventHandler handler = (*handlers)[(*index)++];
+        GuestCallArguments args{};
+        args[0] = event;
+        args[1] = static_cast<std::uint32_t>(target);
+        args[2] = handler.common;
+        call_guest(current, handler.handler, args,
+                   [next](AllegrexContext &returned, std::uint32_t) { (*next)(returned); }, 3u);
+    };
+    (*next)(ctx);
 }
 
 void Kernel::call_guest(AllegrexContext &ctx, std::uint32_t function, const GuestCallArguments &arguments,
