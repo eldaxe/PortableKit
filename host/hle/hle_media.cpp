@@ -652,10 +652,10 @@ void register_vblank_waits(HleRegistrar &hle) {
         wait.type = WaitType::VBlank;
         kernel().block(ctx, wait, 0u);
     };
-    hle.add("sceDisplay", "sceDisplayWaitVblankStart", [](Runtime &rt, AllegrexContext &ctx) {
+    hle.add("sceDisplay", "sceDisplayWaitVblankStart", [wait_for_vblank](Runtime &rt, AllegrexContext &ctx) {
         wait_for_vblank(rt, ctx, false);
     });
-    hle.add("sceDisplay", "sceDisplayWaitVblankStartCB", [](Runtime &rt, AllegrexContext &ctx) {
+    hle.add("sceDisplay", "sceDisplayWaitVblankStartCB", [wait_for_vblank](Runtime &rt, AllegrexContext &ctx) {
         wait_for_vblank(rt, ctx, true);
     });
     // MultiCB waits for that many vblanks: the wait's object counts them
