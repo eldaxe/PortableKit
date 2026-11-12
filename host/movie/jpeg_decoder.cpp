@@ -31,9 +31,14 @@ struct JpegDecoder::Impl {
         context = avcodec_alloc_context3(codec);
         packet = av_packet_alloc();
         frame = av_frame_alloc();
-        if (!context || !packet || !frame) return false;
+        if (!context || !packet || !frame || avcodec_open2(context, codec, nullptr) < 0) {
+            avcodec_free_context(&context);
+            av_packet_free(&packet);
+            av_frame_free(&frame);
+            return false;
+        }
         context->thread_count = 1;
-        return avcodec_open2(context, codec, nullptr) >= 0;
+        return true;
     }
 
     bool take(Picture &out) {
@@ -41,7 +46,7 @@ struct JpegDecoder::Impl {
         const auto format = static_cast<AVPixelFormat>(frame->format);
         const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(format);
         if (!desc || frame->width <= 0 || frame->height <= 0 ||
-            !(desc->flags & AV_PIX_FMT_FLAG_PLANAR) || desc->nb_components < 1 ||
+            !(desc->flags & AV_PIX_FMT_FLAG_PLANAR) || (desc->flags & AV_PIX_FMT_FLAG_RGB) || desc->nb_components < 1 ||
             frame->data[0] == nullptr) {
             av_frame_unref(frame);
             return false;
