@@ -642,21 +642,29 @@ constexpr std::uint64_t kVBlankDurationUs = kVBlankPeriodUs * 14u / 286u;
 // paces its frame loop. Without these the loop spins: a stub returns at once,
 // the game draws again, and nothing else ever gets the processor.
 void register_vblank_waits(HleRegistrar &hle) {
-    const auto wait_for_vblank = [](Runtime &, AllegrexContext &ctx) {
-        trace_pacing("sceDisplayWaitVblankStart");
+    const auto wait_for_vblank = [](Runtime &, AllegrexContext &ctx, bool callback_aware) {
+        trace_pacing(callback_aware ? "sceDisplayWaitVblankStartCB" : "sceDisplayWaitVblankStart");
+        // The CB import must run callbacks pending for this thread before it
+        // blocks. Queueing them before block() lets the scheduler dispatch
+        // the callback instead of leaving it pending until another CB call.
+        if (callback_aware) (void)kernel().deliver_callbacks();
         WaitState wait{};
         wait.type = WaitType::VBlank;
         kernel().block(ctx, wait, 0u);
     };
-    hle.add("sceDisplay", "sceDisplayWaitVblankStart", wait_for_vblank);
-    // The CB forms also run the thread's pending callbacks. The kernel runs
-    // them at the next scheduling point either way, so they wait the same.
-    hle.add("sceDisplay", "sceDisplayWaitVblankStartCB", wait_for_vblank);
+    hle.add("sceDisplay", "sceDisplayWaitVblankStart", [](Runtime &rt, AllegrexContext &ctx) {
+        wait_for_vblank(rt, ctx, false);
+    });
+    hle.add("sceDisplay", "sceDisplayWaitVblankStartCB", [](Runtime &rt, AllegrexContext &ctx) {
+        wait_for_vblank(rt, ctx, true);
+    });
     // MultiCB waits for that many vblanks: the wait's object counts them
-    // down (Kernel::on_vblank). Tenkawa waits two at a time while it loads a
+    // down (Kernel::on_vblank). It must also deliver callbacks like the
+    // single-vblank CB form. Tenkawa waits two at a time while it loads a
     // fight.
     hle.add("sceDisplay", "sceDisplayWaitVblankStartMultiCB", [](Runtime &, AllegrexContext &ctx) {
         trace_pacing("sceDisplayWaitVblankStartMultiCB", arg(ctx, 0));
+        (void)kernel().deliver_callbacks();
         WaitState wait{};
         wait.type = WaitType::VBlank;
         wait.object = static_cast<SceUID>(std::max<std::uint32_t>(arg(ctx, 0), 1u));
