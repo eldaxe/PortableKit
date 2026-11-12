@@ -775,7 +775,7 @@ void register_jpeg(HleRegistrar &hle) {
         jpeg.state = 0; jpeg.width = jpeg.height = 0;
         kernel().finish(ctx, 0u);
     });
-    hle.add("sceJpeg", "sceJpegDecodeMJpeg", [&jpeg, decode_input, write_rgba](Runtime &rt, AllegrexContext &ctx) {
+    hle.add("sceJpeg", "sceJpegDecodeMJpeg", [decode_input, write_rgba](Runtime &rt, AllegrexContext &ctx) {
         if (jpeg.state != 2) { kernel().finish(ctx, kInvalidState); return; }
         movie::Picture picture;
         const std::uint32_t error = decode_input(rt, ctx, picture);
@@ -784,7 +784,7 @@ void register_jpeg(HleRegistrar &hle) {
         if (!write_rgba(rt.memory(), arg(ctx, 2), jpeg.width, picture)) { kernel().finish(ctx, kInvalidValue); return; }
         kernel().finish(ctx, (picture.width << 16u) | picture.height);
     });
-    hle.add("sceJpeg", "sceJpegDecodeMJpegSuccessively", [&jpeg, decode_input, write_rgba](Runtime &rt, AllegrexContext &ctx) {
+    hle.add("sceJpeg", "sceJpegDecodeMJpegSuccessively", [decode_input, write_rgba](Runtime &rt, AllegrexContext &ctx) {
         if (jpeg.state != 2) { kernel().finish(ctx, kInvalidState); return; }
         movie::Picture picture;
         const std::uint32_t error = decode_input(rt, ctx, picture);
