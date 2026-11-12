@@ -751,12 +751,12 @@ void register_jpeg(HleRegistrar &hle) {
         const std::uint64_t size = static_cast<std::uint64_t>(picture.width) * picture.height * 3u / 2u;
         return size <= 0x7FFFFFFFu ? static_cast<std::uint32_t>(size) : 0u;
     };
-    hle.add("sceJpeg", "sceJpegInitMJpeg", [&jpeg](Runtime &, AllegrexContext &ctx) {
+    hle.add("sceJpeg", "sceJpegInitMJpeg", [](Runtime &, AllegrexContext &ctx) {
         if (jpeg.state != 0) { kernel().finish(ctx, kAlreadyInit); return; }
         jpeg.state = 1; jpeg.width = jpeg.height = 0;
         kernel().finish(ctx, 0u);
     });
-    hle.add("sceJpeg", "sceJpegCreateMJpeg", [&jpeg](Runtime &, AllegrexContext &ctx) {
+    hle.add("sceJpeg", "sceJpegCreateMJpeg", [](Runtime &, AllegrexContext &ctx) {
         const std::uint32_t width = arg(ctx, 0), height = arg(ctx, 1);
         if (jpeg.state != 1) { kernel().finish(ctx, kInvalidState); return; }
         if (width == 0u || height == 0u || width > 1024u || height > 1024u) {
@@ -765,12 +765,12 @@ void register_jpeg(HleRegistrar &hle) {
         jpeg.width = width; jpeg.height = height; jpeg.state = 2;
         kernel().finish(ctx, 0u);
     });
-    hle.add("sceJpeg", "sceJpegDeleteMJpeg", [&jpeg](Runtime &, AllegrexContext &ctx) {
+    hle.add("sceJpeg", "sceJpegDeleteMJpeg", [](Runtime &, AllegrexContext &ctx) {
         if (jpeg.state != 2) { kernel().finish(ctx, kInvalidState); return; }
         jpeg.state = 1;
         kernel().finish(ctx, 0u);
     });
-    hle.add("sceJpeg", "sceJpegFinishMJpeg", [&jpeg](Runtime &, AllegrexContext &ctx) {
+    hle.add("sceJpeg", "sceJpegFinishMJpeg", [](Runtime &, AllegrexContext &ctx) {
         if (jpeg.state == 0 || jpeg.state == 2) { kernel().finish(ctx, kInvalidState); return; }
         jpeg.state = 0; jpeg.width = jpeg.height = 0;
         kernel().finish(ctx, 0u);
@@ -819,7 +819,7 @@ void register_jpeg(HleRegistrar &hle) {
         }
         kernel().finish(ctx, (picture.width << 16u) | picture.height);
     });
-    const auto csc = [write_rgba, &jpeg](Runtime &rt, AllegrexContext &ctx, bool mjpeg) {
+    const auto csc = [write_rgba](Runtime &rt, AllegrexContext &ctx, bool mjpeg) {
         auto &memory = rt.memory();
         const std::uint32_t image = arg(ctx, 0), source = arg(ctx, 1);
         const std::uint32_t width = arg(ctx, 2) >> 16u, height = arg(ctx, 2) & 0xFFFFu;
