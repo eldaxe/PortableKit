@@ -819,11 +819,21 @@ void register_jpeg(HleRegistrar &hle) {
         }
         kernel().finish(ctx, (picture.width << 16u) | picture.height);
     });
-    const auto csc = [write_rgba](Runtime &rt, AllegrexContext &ctx, bool color_option) {
+    const auto csc = [write_rgba, &jpeg](Runtime &rt, AllegrexContext &ctx, bool mjpeg) {
         auto &memory = rt.memory();
         const std::uint32_t image = arg(ctx, 0), source = arg(ctx, 1);
         const std::uint32_t width = arg(ctx, 2) >> 16u, height = arg(ctx, 2) & 0xFFFFu;
-        const std::uint32_t stride = arg(ctx, 3);
+        const std::int32_t requested_stride = static_cast<std::int32_t>(arg(ctx, 3));
+        const std::uint32_t stride = requested_stride < 0
+            ? (mjpeg && requested_stride > -901 ? static_cast<std::uint32_t>(901 + requested_stride) : 0u)
+            : static_cast<std::uint32_t>(requested_stride);
+        if (mjpeg && jpeg.state == 0) { kernel().finish(ctx, kInvalidState); return; }
+        if (!mjpeg) {
+            const std::uint32_t color = arg(ctx, 4) & 0x000FFFFFu;
+            if (color != 0x00020202u && color != 0x00020201u && color != 0x00020101u) {
+                kernel().finish(ctx, kInvalidColor); return;
+            }
+        }
         const auto found = module().ycbcr.find(source);
         if (found == module().ycbcr.end() || width == 0u || height == 0u ||
             width > found->second.width || height > found->second.height || stride < width) {
@@ -850,10 +860,9 @@ void register_jpeg(HleRegistrar &hle) {
                 picture.cr[dst] = source_picture.cr[src];
             }
         if (!write_rgba(memory, image, stride, picture)) { kernel().finish(ctx, kInvalidValue); return; }
-        (void)color_option;
         kernel().finish(ctx, 0u);
     };
-    hle.add("sceJpeg", "sceJpegMJpegCsc", [csc](Runtime &rt, AllegrexContext &ctx) { csc(rt, ctx, false); });
+    hle.add("sceJpeg", "sceJpegMJpegCsc", [csc](Runtime &rt, AllegrexContext &ctx) { csc(rt, ctx, true); });
     hle.add("sceJpeg", "sceJpegMJpegCscWithColorOption", [csc](Runtime &rt, AllegrexContext &ctx) { csc(rt, ctx, true); });
     // Existing non-MJPEG CSC import, now shares the same decoded-picture path.
     hle.add("sceJpeg", "sceJpegCsc", [csc](Runtime &rt, AllegrexContext &ctx) { csc(rt, ctx, false); });
