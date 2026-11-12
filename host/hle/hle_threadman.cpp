@@ -1525,6 +1525,16 @@ void register_tlspls(HleRegistrar &hle) {
             kernel().finish(ctx, *address); return;
         }
         found->second.waiters.push_back(kernel().current_uid());
+        if ((found->second.attributes & 0x0100u) != 0u) {
+            auto &waiters = found->second.waiters;
+            std::stable_sort(waiters.begin(), waiters.end(), [](SceUID left, SceUID right) {
+                const Thread *a = kernel().find_thread(left);
+                const Thread *b = kernel().find_thread(right);
+                const std::uint32_t pa = a != nullptr ? a->priority : 0xFFFFFFFFu;
+                const std::uint32_t pb = b != nullptr ? b->priority : 0xFFFFFFFFu;
+                return pa < pb;
+            });
+        }
         kernel().wait_host(ctx, std::nullopt, [uid, thread = kernel().current_uid()](bool) -> std::optional<std::uint32_t> {
             auto pool = tlspls().find(uid);
             if (pool == tlspls().end()) return kWaitDeleteTlspl;
