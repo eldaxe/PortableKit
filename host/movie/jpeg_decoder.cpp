@@ -31,13 +31,19 @@ struct JpegDecoder::Impl {
         context = avcodec_alloc_context3(codec);
         packet = av_packet_alloc();
         frame = av_frame_alloc();
-        if (!context || !packet || !frame || avcodec_open2(context, codec, nullptr) < 0) {
+        if (!context || !packet || !frame) {
             avcodec_free_context(&context);
             av_packet_free(&packet);
             av_frame_free(&frame);
             return false;
         }
         context->thread_count = 1;
+        if (avcodec_open2(context, codec, nullptr) < 0) {
+            avcodec_free_context(&context);
+            av_packet_free(&packet);
+            av_frame_free(&frame);
+            return false;
+        }
         return true;
     }
 
