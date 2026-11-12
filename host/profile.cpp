@@ -13,7 +13,8 @@ const char *env(const char *name) {
     // variable still takes precedence.
     if (game().env_prefix == "GEBURST" &&
         (std::string_view(name) == "TRACE_GE" || std::string_view(name) == "TRACE_AUDIO" ||
-         std::string_view(name) == "TRACE_MPEG" || std::string_view(name) == "TRACE_SAS")) {
+         std::string_view(name) == "TRACE_MPEG" || std::string_view(name) == "TRACE_SAS" ||
+         std::string_view(name) == "TRACE_FB_TEXTURES")) {
         std::string full = game().env_prefix;
         full += '_';
         full += name;
